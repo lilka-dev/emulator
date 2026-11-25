@@ -1,0 +1,67 @@
+--- a/hw/xtensa/esp32s3_clk.c
++++ b/hw/xtensa/esp32s3_clk.c
+@@ -52,6 +52,10 @@
+     uint64_t r = 0;
+ 
+     switch(addr) {
++        case 0x20: /* SYSTEM_PERIP_RST_EN0 */
++        case 0x24: /* SYSTEM_PERIP_RST_EN1 */
++            r = s->periph_reset[(addr - 0x20) / 4];
++            break;
+         case A_SYSTEM_CORE_1_CONTROL_1_REG:
+                 r = s->app_cpu_addr;
+             break;
+@@ -85,6 +89,15 @@
+     ESP32S3ClockState *s = ESP32S3_CLOCK(opaque);
+ 
+     switch(addr) {
++        case 0x20: /* SYSTEM_PERIP_RST_EN0 */
++        case 0x24: /* SYSTEM_PERIP_RST_EN1 */ {
++            unsigned bank = (addr - 0x20) / 4;
++            s->periph_reset[bank] = value;
++            if (s->peripheral_reset && value) {
++                s->peripheral_reset(s->peripheral_reset_opaque, bank, value);
++            }
++            break;
++        }
+         case A_SYSTEM_CORE_1_CONTROL_1_REG:
+                 s->app_cpu_addr = (uint32_t)value;
+             break;
+@@ -114,6 +127,8 @@
+ static void esp32s3_clock_reset_hold(Object *obj, ResetType type)
+ {
+     ESP32S3ClockState *s = ESP32S3_CLOCK(obj);
++    s->periph_reset[0] = 0;
++    s->periph_reset[1] = 0x1fe;
+     /* On board reset, set the proper clocks and dividers */
+     s->sysclk = ( 1 << R_SYSTEM_SYSCLK_CONF_PRE_DIV_CNT_SHIFT) |
+                 (ESP32S3_CLK_SEL_PLL << R_SYSTEM_SYSCLK_CONF_SOC_CLK_SEL_SHIFT) |
+--- a/include/hw/xtensa/esp32s3_clk.h
++++ b/include/hw/xtensa/esp32s3_clk.h
+@@ -48,6 +48,9 @@
+     /* Registers for clocks configuration and frequency dividers */
+     uint32_t cpuperconf;
+     uint32_t sysclk;
++    uint32_t periph_reset[2];
++    void (*peripheral_reset)(void *opaque, unsigned bank, uint32_t mask);
++    void *peripheral_reset_opaque;
+ 
+ 
+     /* IRQs for crosscore interrupts */
+--- a/hw/timer/esp_systimer.c
++++ b/hw/timer/esp_systimer.c
+@@ -576,6 +576,14 @@
+ static void esp_systimer_reset_hold(Object *obj, ResetType type)
+ {
+     ESPSysTimerState *s = ESP_SYSTIMER(obj);
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    /* Counter values and their guest-visible load/snapshot registers belong
++     * to this reset domain too. A fresh enabled counter starts at the reset
++     * epoch, not at virtual time zero or its previous boot's value. */
++    memset(s->counter, 0, sizeof(s->counter));
++    for (int i = 0; i < ESP_SYSTIMER_COUNTER_COUNT; i++) {
++        s->counter[i].base = now;
++    }
+     for (int i = 0; i < ESP_SYSTIMER_COMP_COUNT; i++) {
+         ESPSysTimerComp* comp = &s->comparators[i];
+         QEMUTimer qtimer = comp->qtimer;

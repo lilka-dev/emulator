@@ -1,0 +1,49 @@
+--- a/system/physmem.c
++++ b/system/physmem.c
+@@ -587,15 +587,32 @@
+     bool active;
+ } TCGIOMMUNotifier;
+ 
++static void tcg_iommu_flush_on_cpu(CPUState *cpu, run_on_cpu_data unused)
++{
++    tlb_flush(cpu);
++}
++
+ static void tcg_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
+ {
+     TCGIOMMUNotifier *notifier = container_of(n, TCGIOMMUNotifier, n);
+ 
+-    if (!notifier->active) {
++    if (!qatomic_xchg(&notifier->active, false)) {
+         return;
+     }
+-    tlb_flush(notifier->cpu);
+-    notifier->active = false;
++    /* Espressif's shared cache MMU notifies both CPUs while one runs guest
++     * code. Clearing a foreign TLB here races its generated tag/addend loads:
++     * a matching tag can be followed by the invalid (-1) addend and crash the
++     * host. Kick that CPU and flush only at its own quiescent work boundary,
++     * as tcg_commit below does for address-space changes. No synchronous wait:
++     * two vCPUs changing the MMU must not wait on each other's BQL-held work.
++     * Clear active before queuing; a concurrent refill may reactivate it and
++     * must not have that new registration erased by the queued callback.
++     */
++    if (notifier->cpu->created && !qemu_cpu_is_self(notifier->cpu)) {
++        async_run_on_cpu(notifier->cpu, tcg_iommu_flush_on_cpu, RUN_ON_CPU_NULL);
++    } else {
++        tlb_flush(notifier->cpu);
++    }
+     /* We leave the notifier struct on the list to avoid reallocating it later.
+      * Generally the number of IOMMUs a CPU deals with will be small.
+      * In any case we can't unregister the iommu notifier from a notify
+@@ -646,9 +663,7 @@
+                                               &error_fatal);
+     }
+ 
+-    if (!notifier->active) {
+-        notifier->active = true;
+-    }
++    qatomic_set(&notifier->active, true);
+ }
+ 
+ void tcg_iommu_free_notifier_list(CPUState *cpu)

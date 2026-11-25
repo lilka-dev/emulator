@@ -1,0 +1,20 @@
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -873,6 +873,17 @@
+     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.iomux", DR_REG_IO_MUX_BASE, 0x2000);
+ 
+     
++    /* Experimental Lilka boot probe only: retain LEDC configuration writes.
++     * This does not emulate PWM output, timers, or interrupts. Keeping the
++     * opt-in bank separate prevents mistaking a boot probe for device support.
++     */
++    if (g_getenv("LILKA_QEMU_LEDC_REGISTERS")) {
++        MemoryRegion *ledc_probe = g_new(MemoryRegion, 1);
++        memory_region_init_ram(ledc_probe, NULL, "lilka.ledc-probe", 0x1000,
++                               &error_fatal);
++        memory_region_add_subregion(sys_mem, 0x60019000, ledc_probe);
++    }
++
+     esp32s3_machine_init_sd(ss);
+ 
+     /* Need MMU initialized prior to ELF loading,

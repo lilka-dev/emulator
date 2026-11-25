@@ -1,0 +1,39 @@
+--- a/hw/ssi/esp32s3_spi.c
++++ b/hw/ssi/esp32s3_spi.c
+@@ -142,11 +142,11 @@
+     int bytes = MAX(tx_bytes, rx_bytes);
+     for (int i = 0; i < bytes; ++i) {
+         uint8_t byte = 0;
+-        if (byte < tx_bytes) {
++        if (i < tx_bytes) {
+             memcpy(&byte, tx + i, 1);
+         }
+         uint32_t res = ssi_transfer(s->spi, byte);
+-        if (byte < rx_bytes) {
++        if (i < rx_bytes) {
+             memcpy(rx + i, &res, 1);
+         }
+     }
+@@ -214,16 +214,12 @@
+ {
+     const uint32_t dummy_count = FIELD_EX32(s->mem_user1, SPI_MEM_USER1, USR_DUMMY_CYCLELEN);
+ 
+-    /* Dummy cycles are interpreted as bytes by the emulated SPI Flash. As such, we shall convert
+-     * our dummy cycles count in bytes, rounding it up. For example:
+-     * 0 cycles = 0 byte
+-     * 1 cycle = 1 byte
+-     * ...
+-     * 8 cycles = 1 byte
+-     * 9 cycles = 2 bytes
+-     * etc..
+-     */
+-    *len = (dummy_count + 7) / 8;
++    /* The register stores clocks minus one. SSI consumes whole bytes; DIO
++     * and QIO dummy phases carry two/four bits per clock, respectively.
++     * Output-only dual/quad reads retain the serial dummy phase. */
++    unsigned lanes = FIELD_EX32(s->mem_ctrl, SPI_MEM_CTRL, FREAD_QIO) ? 4 :
++                     FIELD_EX32(s->mem_ctrl, SPI_MEM_CTRL, FREAD_DIO) ? 2 : 1;
++    *len = DIV_ROUND_UP((dummy_count + 1) * lanes, 8);
+ }
+ 
+ static void esp32s3_spi_begin_transaction(ESP32S3SpiState *s)

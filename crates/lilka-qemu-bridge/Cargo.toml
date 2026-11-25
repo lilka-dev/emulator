@@ -1,0 +1,22 @@
+[package]
+name = "lilka-qemu-board-bridge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["wifi-experimental"]
+wifi-experimental = []
+
+[dependencies]
+lilka-board = { path = "../lilka-board" }
+serde_json = "1"
+
+
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp"] }
+
+anyhow = "1"

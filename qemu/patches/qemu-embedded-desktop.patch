@@ -1,0 +1,109 @@
+--- a/system/main.c
++++ b/system/main.c
+@@ -42,8 +42,50 @@
+ 
+ int (*qemu_main)(void) = qemu_default_main;
+ 
++
++#ifdef LILKA_EMBEDDED_DESKTOP
++#include "qemu/main-loop.h"
++#include "sysemu/runstate.h"
++#include "sysemu/reset.h"
++#include "qemu/atomic.h"
++extern int lilka_desktop_main(void);
++extern void lilka_board_shutdown(void);
++static bool lilka_ready;
++
++bool lilka_cpu_ready(void) { return qatomic_read(&lilka_ready); }
++int lilka_cpu_run(int argc, char **argv)
++{
++    qemu_init(argc, argv);
++    qatomic_set(&lilka_ready, true);
++    int status = qemu_default_main();
++    qatomic_set(&lilka_ready, false);
++    lilka_board_shutdown();
++    return status;
++}
++void lilka_cpu_shutdown(void)
++{
++    if (!lilka_cpu_ready()) { return; }
++    bql_lock();
++    qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_QMP_QUIT);
++    bql_unlock();
++}
++void lilka_cpu_reset(void)
++{
++    if (!lilka_cpu_ready()) { return; }
++    bql_lock();
++    qemu_system_reset_request(SHUTDOWN_CAUSE_HOST_QMP_SYSTEM_RESET);
++    bql_unlock();
++}
++#endif
++
+ int main(int argc, char **argv)
+ {
++#ifdef LILKA_EMBEDDED_DESKTOP
++    if (argc <= 1 || strcmp(argv[1], "--cpu-only") != 0) {
++        return lilka_desktop_main();
++    }
++    argv++; argc--;
++#endif
+     qemu_init(argc, argv);
+     return qemu_main();
+ }
+--- a/meson.build
++++ b/meson.build
+@@ -4283,13 +4283,23 @@
+       exe_name += '-unsigned'
+     endif
+ 
++    lilka_link = []
++    lilka_cflags = []
++    lilka_link_depends = []
++    if get_option('lilka_frontend') != '' and target == 'xtensa-softmmu'
++      lilka_link = [get_option('lilka_frontend'), '-ldl', '-lpthread', '-lm', '-lrt', '-lutil']
++      lilka_link += ['-Wl,--export-dynamic-symbol=lilka_cpu_run', '-Wl,--export-dynamic-symbol=lilka_cpu_ready', '-Wl,--export-dynamic-symbol=lilka_cpu_shutdown', '-Wl,--export-dynamic-symbol=lilka_cpu_reset']
++      lilka_cflags = ['-DLILKA_EMBEDDED_DESKTOP']
++      lilka_link_depends = [get_option('lilka_frontend')]
++    endif
++
+     emulator = executable(exe_name, exe['sources'],
+                install: true,
+-               c_args: c_args,
++               c_args: c_args + lilka_cflags,
+                dependencies: arch_deps + exe['dependencies'],
+                objects: lib.extract_all_objects(recursive: true),
+-               link_depends: [block_syms, qemu_syms],
+-               link_args: link_args,
++               link_depends: [block_syms, qemu_syms] + lilka_link_depends,
++               link_args: link_args + lilka_link,
+                win_subsystem: exe['win_subsystem'])
+ 
+     if host_os == 'darwin'
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -382,3 +382,5 @@
+        description: 'Rust support')
+ option('strict_rust_lints', type: 'boolean', value: false,
+        description: 'Enable stricter set of Rust warnings')
++
++option('lilka_frontend', type: 'string', value: '', description: 'Rust desktop static library')
+--- a/hw/xtensa/lilka_board_probe.c
++++ b/hw/xtensa/lilka_board_probe.c
+@@ -406,6 +406,7 @@
+ }
+ static void lilka_finish(void)
+ {
++    if (!bridge.board) { return; }
+     lilka_service_clock_report();
+     fprintf(stderr, "Lilka SPI eventless commands=%" PRIu64 " pio=%" PRIu64
+             " clock_limit_requests=%" PRIu64 " updates=%" PRIu64 "\n",
+@@ -573,3 +574,8 @@
+     }
+     atexit(lilka_finish);
+ }
++
++void lilka_board_shutdown(void)
++{
++    lilka_finish();
++}

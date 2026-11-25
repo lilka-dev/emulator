@@ -1,0 +1,225 @@
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -26,6 +26,8 @@
+ #include "qemu/main-loop.h"
+ #include "qemu/timer.h"
+ #include "qemu/lockable.h"
++#include "qemu/lilka-clock.h"
++#include "qemu/atomic.h"
+ #include "sysemu/cpu-timers.h"
+ #include "sysemu/replay.h"
+ #include "sysemu/cpus.h"
+@@ -607,14 +609,131 @@
+     return progress;
+ }
+ 
++/* Experimental Lilka fast-forward. Set once by board initialization, before
++ * vCPU threads start; default 100 preserves all ordinary QEMU clocks. This
++ * measures execution headroom, it does not reduce firmware work per guest sec.
++ */
++unsigned lilka_clock_rate_percent = 100;
++
++/* Optional MTTCG clock barrier. Device state is read only under BQL; this
++ * small mutex protects clock arithmetic alone and never calls back into BQL.
++ * Raw time is obtained before taking it, avoiding timer-lock inversion.
++ */
++static bool lilka_service_active;
++static QemuMutex lilka_service_mutex;
++static struct {
++    int64_t raw, value, limit, pending_since;
++    bool pending, bypass;
++    uint64_t fences, bypasses, max_lag;
++} lilka_service;
++
++bool lilka_service_clock_enabled(void)
++{
++    return qatomic_read(&lilka_service_active);
++}
++
++void lilka_service_clock_enable(void)
++{
++    assert(!icount_enabled());
++    assert(!lilka_service_clock_enabled());
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    qemu_mutex_init(&lilka_service_mutex);
++    lilka_service.raw = lilka_service.value = now;
++    lilka_service.limit = INT64_MAX;
++    qatomic_set(&lilka_service_active, true);
++}
++
++void lilka_service_clock_limit(int64_t limit_ns, bool irq_pending)
++{
++    if (!lilka_service_clock_enabled()) {
++        return;
++    }
++    qemu_mutex_lock(&lilka_service_mutex);
++    if (irq_pending && !lilka_service.pending) {
++        lilka_service.pending_since = lilka_service.raw;
++    }
++    if (!irq_pending) {
++        lilka_service.bypass = false;
++    }
++    lilka_service.pending = irq_pending;
++    lilka_service.limit = MAX(limit_ns, lilka_service.value);
++    qemu_mutex_unlock(&lilka_service_mutex);
++}
++
++static int64_t lilka_service_clock_now(int64_t raw)
++{
++    if (!lilka_service_clock_enabled()) {
++        return raw;
++    }
++    qemu_mutex_lock(&lilka_service_mutex);
++    /* Readers on different vCPUs may obtain raw timestamps out of order. */
++    int64_t delta = MAX(raw - lilka_service.raw, 0);
++    lilka_service.raw = MAX(lilka_service.raw, raw);
++    if (lilka_service.pending && !lilka_service.bypass &&
++        lilka_service.raw - lilka_service.pending_since >= 250000000) {
++        /* A guest may deliberately mask an enabled DMA interrupt. Avoid
++         * freezing such firmware forever; strict host-clock behavior then
++         * resumes for this unacknowledged interrupt epoch.
++         */
++        lilka_service.bypass = true;
++        lilka_service.bypasses++;
++    }
++    int64_t lag = lilka_service.raw - lilka_service.value;
++    int64_t advance = MIN(delta, lag);
++    advance += MIN(delta / 50, lag - advance); /* bounded 102% catch-up */
++    int64_t next = lilka_service.value + advance;
++    if (!lilka_service.bypass && next > lilka_service.limit) {
++        next = lilka_service.limit;
++        lilka_service.fences++;
++    }
++    lilka_service.value = next;
++    lilka_service.max_lag = MAX(lilka_service.max_lag,
++                               lilka_service.raw - next);
++    qemu_mutex_unlock(&lilka_service_mutex);
++    return next;
++}
++
++static unsigned lilka_service_wait_rate(void)
++{
++    unsigned rate = lilka_clock_rate_percent;
++    if (lilka_service_clock_enabled()) {
++        qemu_mutex_lock(&lilka_service_mutex);
++        if (lilka_service.raw > lilka_service.value) {
++            rate += rate / 50;
++        }
++        qemu_mutex_unlock(&lilka_service_mutex);
++    }
++    return rate;
++}
++
++void lilka_service_clock_report(void)
++{
++    if (!lilka_service_clock_enabled()) {
++        return;
++    }
++    qemu_mutex_lock(&lilka_service_mutex);
++    fprintf(stderr, "Lilka service clock fences=%" PRIu64
++            " watchdog_bypasses=%" PRIu64 " max_lag_ns=%" PRIu64 "\n",
++            lilka_service.fences, lilka_service.bypasses, lilka_service.max_lag);
++    qemu_mutex_unlock(&lilka_service_mutex);
++}
++
+ int64_t timerlistgroup_deadline_ns(QEMUTimerListGroup *tlg)
+ {
+     int64_t deadline = -1;
+     QEMUClockType type;
+     for (type = 0; type < QEMU_CLOCK_MAX; type++) {
+         if (qemu_clock_use_for_deadline(type)) {
+-            deadline = qemu_soonest_timeout(deadline,
+-                                            timerlist_deadline_ns(tlg->tl[type]));
++            int64_t delta = timerlist_deadline_ns(tlg->tl[type]);
++            unsigned rate = type == QEMU_CLOCK_VIRTUAL ?
++                            lilka_service_wait_rate() : 100;
++            if (type == QEMU_CLOCK_VIRTUAL && delta > 0 && rate != 100) {
++                /* Convert guest ns to host wait ns, rounded up. Retain all
++                 * device timer deadlines in their existing virtual units. */
++                delta = delta / rate * 100 +
++                    (delta % rate * 100 + rate - 1) / rate;
++            }
++            deadline = qemu_soonest_timeout(deadline, delta);
+         }
+     }
+     return deadline;
+@@ -626,8 +745,16 @@
+     case QEMU_CLOCK_REALTIME:
+         return get_clock();
+     default:
+-    case QEMU_CLOCK_VIRTUAL:
+-        return cpus_get_virtual_clock();
++    case QEMU_CLOCK_VIRTUAL: {
++        int64_t now = cpus_get_virtual_clock();
++        if (lilka_clock_rate_percent != 100) {
++            /* Rate is constrained to 25..400; quotient first avoids a
++             * multiplication overflow for all realistic VM lifetimes. */
++            now = now / 100 * lilka_clock_rate_percent +
++                  now % 100 * lilka_clock_rate_percent / 100;
++        }
++        return lilka_service_clock_now(now);
++    }
+     case QEMU_CLOCK_HOST:
+         return REPLAY_CLOCK(REPLAY_CLOCK_HOST, get_clock_realtime());
+     case QEMU_CLOCK_VIRTUAL_RT:
+--- /dev/null
++++ b/include/qemu/lilka-clock.h
+@@ -0,0 +1,12 @@
++/* Optional functional peripheral clock for the separate Lilka board.
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef QEMU_LILKA_CLOCK_H
++#define QEMU_LILKA_CLOCK_H
++
++bool lilka_service_clock_enabled(void);
++void lilka_service_clock_enable(void);
++void lilka_service_clock_limit(int64_t limit_ns, bool irq_pending);
++void lilka_service_clock_report(void);
++
++#endif
+--- a/accel/tcg/tcg-accel-ops-rr.c
++++ b/accel/tcg/tcg-accel-ops-rr.c
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/lilka-clock.h"
+ #include "qemu/lockable.h"
+ #include "sysemu/tcg.h"
+ #include "sysemu/replay.h"
+@@ -61,10 +62,12 @@
+ 
+ static QEMUTimer *rr_kick_vcpu_timer;
+ static CPUState *rr_current_cpu;
++static QEMUClockType rr_kick_clock = QEMU_CLOCK_VIRTUAL;
++static int64_t rr_kick_period = TCG_KICK_PERIOD;
+ 
+ static inline int64_t rr_next_kick_time(void)
+ {
+-    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + TCG_KICK_PERIOD;
++    return qemu_clock_get_ns(rr_kick_clock) + rr_kick_period;
+ }
+ 
+ /* Kick the currently round-robin scheduled vCPU to next */
+@@ -90,8 +93,19 @@
+ static void rr_start_kick_timer(void)
+ {
+     if (!rr_kick_vcpu_timer && CPU_NEXT(first_cpu)) {
+-        rr_kick_vcpu_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+-                                           rr_kick_thread, NULL);
++        if (lilka_service_clock_enabled() && g_getenv("LILKA_QEMU_FAIR_RR")) {
++            /* A functional peripheral clock may wait for IRQ service on the
++             * other vCPU. CPU scheduling must keep running during that wait.
++             * The upstream 100 ms quantum also exceeds audio DMA deadlines.
++             * This timer schedules host work only; guest peripherals retain
++             * the common virtual clock. Icount never enables this profile. */
++            rr_kick_clock = QEMU_CLOCK_REALTIME;
++            rr_kick_period = NANOSECONDS_PER_SECOND / 1000;
++            fprintf(stderr, "Lilka fair RR host quantum_ns=%" PRId64 "\n",
++                    rr_kick_period);
++        }
++        rr_kick_vcpu_timer = timer_new_ns(rr_kick_clock,
++                                        rr_kick_thread, NULL);
+     }
+     if (rr_kick_vcpu_timer && !timer_pending(rr_kick_vcpu_timer)) {
+         timer_mod(rr_kick_vcpu_timer, rr_next_kick_time());

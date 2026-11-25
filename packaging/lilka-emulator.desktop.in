@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Lilka Emulator
+Exec="@APP_ROOT@/dist/lilka-emulator/lilka-emulator"
+Icon=@APP_ROOT@/assets/lilka.svg
+Terminal=false
+Categories=Game;Emulator;

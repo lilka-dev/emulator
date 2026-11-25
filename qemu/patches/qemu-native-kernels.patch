@@ -1,0 +1,231 @@
+--- a/target/xtensa/helper.c
++++ b/target/xtensa/helper.c
+@@ -327,3 +327,76 @@
+     }
+ }
+ #endif /* !CONFIG_USER_ONLY */
++
++
++/* Optional bounded acceleration of a verified scalar halfword-fill loop.
++ * Unknown code, watchpoints and non-RAM mappings retain ordinary execution.
++ */
++uint64_t lilka_fill16_pixels, lilka_fill16_calls;
++uint64_t lilka_rom_udiv_calls, lilka_rom_udiv_zeroes;
++uint32_t HELPER(lilka_rom_udiv)(CPUXtensaState *env, uint32_t compat_zero)
++{
++    CPUWatchpoint *wp;
++    uint64_t numerator, denominator, quotient;
++    if (env->sregs[IBREAKENABLE]) {
++        return 0;
++    }
++    QTAILQ_FOREACH(wp, &env_cpu(env)->watchpoints, entry) {
++        if (wp->flags & BP_GDB) {
++            return 0;
++        }
++    }
++    /* Windowed ABI function replacement, not an ISA instruction replacement.
++     * ENTRY and RETW execute normally. Only ABI return registers are changed;
++     * caller-clobbered scratch registers/SAR need not reproduce the ROM's
++     * intermediate implementation. No guest memory is read or written here.
++     */
++    numerator = env->regs[2] | ((uint64_t)env->regs[3] << 32);
++    denominator = env->regs[4] | ((uint64_t)env->regs[5] << 32);
++    if (!denominator) {
++        if (!compat_zero) {
++            return 0; /* Original ROM raises its ordinary divide exception. */
++        }
++        /* Optional fast-profile compromise for C library division by zero,
++         * e.g. a firmware FPS display with a sub-millisecond frame. */
++        quotient = 0;
++        qatomic_fetch_add(&lilka_rom_udiv_zeroes, 1);
++    } else {
++        quotient = numerator / denominator;
++    }
++    env->regs[2] = quotient;
++    env->regs[3] = quotient >> 32;
++    qatomic_fetch_add(&lilka_rom_udiv_calls, 1);
++    return 1;
++}
++uint32_t HELPER(lilka_fill16)(CPUXtensaState *env, uint32_t mmu_idx)
++{
++    qatomic_fetch_add(&lilka_fill16_calls, 1);
++    int32_t index = env->regs[3], end = env->regs[5];
++    uint32_t address, count;
++    void *host;
++    if (index >= end || env->sregs[IBREAKENABLE]) {
++        return 0;
++    }
++    address = env->regs[4] + (uint32_t)index * 2;
++    if (address & 1) {
++        return 0;
++    }
++    count = MIN((int64_t)end - index, 256);
++    count = MIN(count, (TARGET_PAGE_SIZE - (address & ~TARGET_PAGE_MASK)) / 2);
++    /* Nonfaulting probe retains MMU/permission checks, handles dirty/code
++     * invalidation, and rejects MMIO/watchpoints before changing guest data.
++     * The batch never crosses a target page or skips a scalar fault.
++     */
++    if (probe_access_flags(env, address, count * 2, MMU_DATA_STORE, mmu_idx,
++                           true, &host, GETPC()) || !host) {
++        return 0;
++    }
++    for (unsigned i = 0; i < count; i++) {
++        qatomic_set((uint16_t *)host + i, cpu_to_le16((uint16_t)env->regs[7]));
++    }
++    env->regs[3] += count;
++    env->regs[9] = address + (count - 1) * 2;
++    qatomic_fetch_add(&lilka_fill16_pixels, count);
++    return count;
++}
+--- a/target/xtensa/helper.h
++++ b/target/xtensa/helper.h
+@@ -194,3 +194,6 @@
+ 
+ DEF_HELPER_4(ld_qacc_x_l_128_ip_s3, void, env, i32, i32, i64)
+ DEF_HELPER_3(st_qacc_x_l_128_ip_s3, i64, env, i32, i32)
++
++DEF_HELPER_2(lilka_fill16, i32, env, i32)
++DEF_HELPER_2(lilka_rom_udiv, i32, env, i32)
+--- a/target/xtensa/translate.c
++++ b/target/xtensa/translate.c
+@@ -406,7 +406,7 @@
+     TCGLabel *label = gen_new_label();
+ 
+     tcg_gen_brcond_i32(cond, t0, t1, label);
+-    gen_jumpi_check_loop_end(dc, 0);
++    gen_jumpi_check_loop_end(dc, dc->lilka_fill16 ? -1 : 0);
+     gen_set_label(label);
+     gen_jumpi(dc, addr, 1);
+ }
+@@ -806,6 +806,82 @@
+         -1 : (pa->resource > pb->resource ? 1 : 0);
+ }
+ 
++static bool gen_lilka_rom_udiv(CPUXtensaState *env, DisasContext *dc)
++{
++    /* ESP32-S3 rev0 ROM __udivdi3 body, after its ordinary ENTRY. Recognize
++     * every replaced byte, not an application address or a framework name.
++     * Only a digest is embedded; no ROM implementation is copied here.
++     */
++    const uint32_t start = 0x400568ff, end = 0x40056b6a;
++    uint8_t body[0x26b];
++    if (dc->pc != start || !g_getenv("LILKA_QEMU_ROM_UDIV") ||
++        dc->base.plugin_enabled || dc->icount || !dc->cwoe || dc->window < 3 ||
++        (tb_cflags(dc->base.tb) & (CF_USE_ICOUNT | CF_SINGLE_STEP |
++                                  CF_NO_GOTO_TB | CF_NO_GOTO_PTR)) ||
++        !QTAILQ_EMPTY(&env_cpu(env)->breakpoints) ||
++        (dc->lend > start && dc->lend <= end)) {
++        return false;
++    }
++    for (unsigned i = 0; i < sizeof(body); i++) {
++        body[i] = translator_ldub(env, &dc->base, start + i);
++    }
++    char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, body,
++                                              sizeof(body));
++    bool match = !strcmp(digest,
++        "defe672601e172010691d15ace97665b30be5ebfbae366dea802e6786074c0c9");
++    g_free(digest);
++    if (!match) {
++        return false;
++    }
++    TCGLabel *fallback = gen_new_label();
++    TCGv_i32 done = tcg_temp_new_i32();
++    gen_helper_lilka_rom_udiv(done, tcg_env,
++        tcg_constant_i32(g_getenv("LILKA_QEMU_ROM_DIV_COMPAT") != NULL));
++    tcg_gen_brcondi_i32(TCG_COND_EQ, done, 0, fallback);
++    gen_jumpi(dc, end - 2, 0); /* Execute the original RETW, including checks. */
++    gen_set_label(fallback);
++    dc->base.is_jmp = DISAS_NEXT;
++    return true;
++}
++
++static bool gen_lilka_fill16(CPUXtensaState *env, DisasContext *dc)
++{
++    /* Recognize instructions, never a firmware address or framework ABI:
++     * bge a3,a5,+64; slli a9,a3,1; add.n a9,a4,a9;
++     * s16i a7,a9,0; addi.n a3,a3,1; j -13.
++     */
++    static const uint8_t pattern[] = {
++        0x57,0xa3,0x3c,0xf0,0x93,0x11,0x9a,0x94,
++        0x72,0x59,0x00,0x1b,0x33,0xc6,0xfb,0xff
++    };
++    uint32_t pc = dc->pc;
++    if (!g_getenv("LILKA_QEMU_FILL16") || dc->base.plugin_enabled ||
++        (tb_cflags(dc->base.tb) & (CF_USE_ICOUNT | CF_SINGLE_STEP |
++                                  CF_NO_GOTO_TB | CF_NO_GOTO_PTR)) ||
++        dc->icount || dc->window < 2 ||
++        !((pc >= 0x42000000 && pc < 0x44000000) ||
++          (pc >= 0x40370000 && pc < 0x403e0000)) ||
++        (pc & ~TARGET_PAGE_MASK) > TARGET_PAGE_SIZE - sizeof(pattern) ||
++        (dc->lend > pc && dc->lend <= pc + sizeof(pattern))) {
++        return false;
++    }
++    for (unsigned i = 0; i < sizeof(pattern); i++) {
++        if (translator_ldub(env, &dc->base, pc + i) != pattern[i]) {
++            return false;
++        }
++    }
++    TCGLabel *fallback = gen_new_label();
++    TCGv_i32 count = tcg_temp_new_i32();
++    tcg_gen_brcond_i32(TCG_COND_GE, cpu_R[3], cpu_R[5], fallback);
++    gen_helper_lilka_fill16(count, tcg_env, tcg_constant_i32(dc->cring));
++    tcg_gen_brcondi_i32(TCG_COND_EQ, count, 0, fallback);
++    dc->lilka_fill16 = true;
++    gen_jumpi(dc, pc, 0);
++    gen_set_label(fallback);
++    dc->base.is_jmp = DISAS_NEXT;
++    return true;
++}
++
+ static void disas_xtensa_insn(CPUXtensaState *env, DisasContext *dc)
+ {
+     xtensa_isa isa = dc->config->isa;
+@@ -837,6 +913,8 @@
+     for (i = 1; i < len; ++i) {
+         b[i] = translator_ldub(env, &dc->base, dc->pc + i);
+     }
++    bool rom_udiv = gen_lilka_rom_udiv(env, dc);
++    bool fill16 = gen_lilka_fill16(env, dc);
+     xtensa_insnbuf_from_chars(isa, dc->insnbuf, b, len);
+     fmt = xtensa_format_decode(isa, dc->insnbuf);
+     if (fmt == XTENSA_UNDEFINED) {
+@@ -1085,6 +1163,21 @@
+             gen_check_loop_end(dc, 0);
+         }
+     }
++    if (rom_udiv) {
++        /* Cover every hashed body byte for SMC/debugger invalidation. The
++         * ordinary fallback executes only the current instruction, then
++         * resumes at its true next PC, not at the end of this coverage. */
++        if (dc->base.is_jmp == DISAS_NEXT) {
++            gen_jumpi(dc, dc->base.pc_next, -1);
++        }
++        dc->base.pc_next = MAX(dc->base.pc_next, 0x40056b6a);
++    }
++    if (fill16) {
++        /* Body bytes participate in the recognition and must invalidate this
++         * TB on modification, even though the fallback is just the BGE. */
++        dc->base.pc_next = MAX(dc->base.pc_next, dc->pc + 16);
++    }
++    dc->lilka_fill16 = false;
+     dc->pc = dc->base.pc_next;
+ }
+ 
+@@ -1100,6 +1193,7 @@
+     DisasContext *dc = container_of(dcbase, DisasContext, base);
+     uint32_t tb_flags = dc->base.tb->flags;
+ 
++    dc->lilka_fill16 = false;
+     dc->config = cpu_env(cpu)->config;
+     dc->pc = dc->base.pc_first;
+     dc->ring = tb_flags & XTENSA_TBFLAG_RING_MASK;
+--- a/target/xtensa/translate.h
++++ b/target/xtensa/translate.h
+@@ -39,6 +39,7 @@
+ 
+     bool debug;
+     bool icount;
++    bool lilka_fill16;
+     TCGv_i32 next_icount;
+ 
+     unsigned cpenable;

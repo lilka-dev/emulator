@@ -1,0 +1,86 @@
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -200,6 +200,37 @@
+     }
+ }
+ 
++void lilka_qemu_board_reset(void);
++void lilka_qemu_board_peripheral_reset(unsigned bank, uint32_t mask);
++
++static void esp32s3_peripheral_reset(void *opaque, unsigned bank, uint32_t mask)
++{
++    Esp32s3SocState *s = opaque;
++    lilka_qemu_board_peripheral_reset(bank, mask);
++    if (bank == 0) {
++        if (mask & BIT(1)) {
++            device_cold_reset(DEVICE(&s->spi1));
++        }
++        if (mask & BIT(2)) {
++            device_cold_reset(DEVICE(&s->uart[0]));
++        }
++        if (mask & BIT(5)) {
++            device_cold_reset(DEVICE(&s->uart[1]));
++        }
++        if (mask & BIT(13)) {
++            device_cold_reset(DEVICE(&s->timg[0]));
++        }
++        if (mask & BIT(15)) {
++            device_cold_reset(DEVICE(&s->timg[1]));
++        }
++        if (mask & BIT(29)) {
++            device_cold_reset(DEVICE(&s->systimer));
++        }
++    } else if (mask & BIT(9)) {
++        device_cold_reset(DEVICE(&s->uart[2]));
++    }
++}
++
+ static void esp32s3_soc_reset(DeviceState *dev)
+ {
+     Esp32s3SocState *s = ESP32S3_SOC(dev);
+@@ -208,6 +239,13 @@
+     }
+     if (s->requested_reset & ESP32S3_SOC_RESET_PERIPH) {
+         device_cold_reset(DEVICE(&s->intmatrix));
++        device_cold_reset(DEVICE(&s->clock));
++        device_cold_reset(DEVICE(&s->spi1));
++        device_cold_reset(DEVICE(&s->systimer));
++        for (int i = 0; i < 2; i++) {
++            device_cold_reset(DEVICE(&s->timg[i]));
++        }
++        lilka_qemu_board_reset();
+         for (int i = 0; i < ESP32S3_UART_COUNT; ++i) {
+             device_cold_reset(DEVICE(&s->uart[i]));
+         }
+@@ -225,8 +263,22 @@
+     s->requested_reset = 0;
+ }
+ 
++static void esp32s3_apply_cpu_stall(CPUState *cpu, run_on_cpu_data data)
++{
++    xtensa_runstall(cpu_env(cpu), data.host_int != 0);
++}
++
+ static void esp32s3_cpu_stall(void* opaque, int n, int level)
+ {
++    Esp32s3SocState *s = ESP32S3_SOC(opaque);
++    if (!g_getenv("LILKA_QEMU_CPU_STALL")) {
++        return;
++    }
++    /* RTC MMIO may be issued by the other core. Serialize execution-state
++     * changes on the owning CPU, retaining the FIFO order of stall/un-stall.
++     */
++    async_run_on_cpu(CPU(&s->cpu[n]), esp32s3_apply_cpu_stall,
++                     RUN_ON_CPU_HOST_INT(level != 0));
+ }
+ 
+ static void esp32s3_clk_update(void* opaque, int n, int level)
+@@ -717,6 +769,8 @@
+ 
+     /* System clock realization */
+     {
++        ss->clock.peripheral_reset = esp32s3_peripheral_reset;
++        ss->clock.peripheral_reset_opaque = ss;
+         sysbus_realize(SYS_BUS_DEVICE(&ss->clock), &error_fatal);
+         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->clock), 0);
+         memory_region_add_subregion_overlap(sys_mem, DR_REG_SYSTEM_BASE, mr, 0);

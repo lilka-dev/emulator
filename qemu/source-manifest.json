@@ -1,0 +1,180 @@
+{
+  "project": "https://github.com/espressif/qemu",
+  "tag": "esp-develop-9.2.2-20260417",
+  "source_archive_sha256": "113bbae7d27dd39682c424e06ae18b0ec023ba8e4ab6754647116336557132c9",
+  "patches": [
+    {
+      "file": "patches/qemu-psram-bounds.patch",
+      "sha256": "2a08cfb9861ee5ed43ab5c5c1009e1f4172f2ac39895c3cc6c9f0eda6893f6f4"
+    },
+    {
+      "file": "patches/qemu-disable-slirp.patch",
+      "sha256": "8d29c9d7eca548b52f8ca9965d8cd66ec27355b20e8dd577aeef0715e990cf6f"
+    },
+    {
+      "file": "patches/qemu-ledc-probe.patch",
+      "sha256": "40f551667c7cfa05fd6094f132d71bbb2351a7e3a2bc698b6464f12fdd7158a4"
+    },
+    {
+      "file": "patches/qemu-clockless-core.patch",
+      "sha256": "c248b43fa787ee6c1b4f03a7180436ce3a275ebd61c980b5e161a408e8f0bba6"
+    },
+    {
+      "file": "patches/qemu-board-integration.patch",
+      "sha256": "346e6900de0387f85d6f43d6d1ee292d24dc8f29820fa21e312474a510802e50"
+    },
+    {
+      "file": "patches/qemu-native-spi.patch",
+      "sha256": "485f7d3e928320a1123ad4e212535646d27b24da451ce84e3ad0218cd3446922"
+    },
+    {
+      "file": "patches/qemu-clock-rate.patch",
+      "sha256": "bef6655a7b57dfd70d784f1b28d89fefa0ef76275252ab5a6c76a1932eb9414d"
+    },
+    {
+      "file": "patches/qemu-iommu-owner.patch",
+      "sha256": "f0fdd0b93258386f36c5563e8f0c9276f3f463f86c2ca23a0204c3a094e9d62b"
+    },
+    {
+      "file": "patches/qemu-native-kernels.patch",
+      "sha256": "dc2c75372ba5ffa8fc2ae660dce606bb10b788520913176e8b10d7f2c160421f"
+    },
+    {
+      "file": "patches/qemu-spi-duplex.patch",
+      "sha256": "d5b15854693ce8cf7ff9ec4e1b8ab7eabbfaab1932661626dc3a91bf5b4c864e"
+    },
+    {
+      "file": "patches/qemu-board-reset.patch",
+      "sha256": "ac5b69cacb7f985682361f2c38129a833bcf84d4426524ec7f59467f64e673fe"
+    },
+    {
+      "file": "patches/qemu-selective-reset.patch",
+      "sha256": "57e672737cf2a7456d17f459f04e10a921abb7c997f37d2f7aab4c706b93bb7a"
+    },
+    {
+      "file": "patches/qemu-radio-temperature.patch",
+      "sha256": "8d65ab26a91577d083ab8a696a637000f5400156347e5c9c176ab883cfdfa173"
+    },
+    {
+      "file": "patches/qemu-crypto-dma.patch",
+      "sha256": "a4b86a27d1e37efc2f3aaebc2a6e0675e97b40075b01c9d5a4f0138f5d7b69ed"
+    },
+    {
+      "file": "patches/qemu-embedded-desktop.patch",
+      "sha256": "f3ed2f9f090243e31f0338da170804da338b2ea4b44651ae84c07cd2fa6a653f"
+    }
+  ],
+  "source_files": [
+    {
+      "file": "accel/tcg/cputlb.c",
+      "sha256": "3319cafed7a7bc8bb7b963aa0ac8b786018e13e70c78f55067120f3ef8d8ca48"
+    },
+    {
+      "file": "accel/tcg/tcg-accel-ops-rr.c",
+      "sha256": "743001df5a1abde100a793db14bb21179664653da284f28818ed459b2665d191"
+    },
+    {
+      "file": "hw/misc/ssi_psram.c",
+      "sha256": "92af5690d4259f7d0fe24686c3415d4ffbf21c42234d4599f757d61fbf6e5d7b"
+    },
+    {
+      "file": "hw/ssi/esp32s3_spi.c",
+      "sha256": "0b51dd7305a4db529515cd1b251842d6c697afb2acea7d001aaf7c5a36b82fab"
+    },
+    {
+      "file": "hw/timer/esp_systimer.c",
+      "sha256": "da0e5d60515539c36881c3d503050dc707231e9a5c7294171289313a6065a943"
+    },
+    {
+      "file": "hw/xtensa/esp32s3.c",
+      "sha256": "e8eba81b58a8c31f482c86cce615558f7af54605919c07bdd8d97a83f9566cae"
+    },
+    {
+      "file": "hw/xtensa/esp32s3_clk.c",
+      "sha256": "83f53126a6d5b235a0f49fe2da5e963b58e81792c1a1a5b8db36837b1538acfc"
+    },
+    {
+      "file": "hw/xtensa/lilka_board_probe.c",
+      "sha256": "b9982ba2eeb16ff24cb0fadf72d780a095bb4c505f63b2d34d36d3b7698d7822"
+    },
+    {
+      "file": "hw/xtensa/meson.build",
+      "sha256": "d300095705b43ee5e30ab62bbe86f197b16c367c579b1bc528c40f2a5aa62630"
+    },
+    {
+      "file": "include/hw/xtensa/esp32s3_clk.h",
+      "sha256": "fc10c2a01b493917021c36e99e239c70fd9e92ce1eaf2ed01baaaf8ae0993d18"
+    },
+    {
+      "file": "include/qemu/lilka-clock.h",
+      "sha256": "4b0595620900d2d14f3b2b3e6416f99d2a2b1e10904ecd6ce83ed2a5e128db04"
+    },
+    {
+      "file": "include/tcg/lilka-inline-io.h",
+      "sha256": "5f989189d875cde97064169088e6d0e5df9ccf958863ceee2282c40f5c203a80"
+    },
+    {
+      "file": "meson.build",
+      "sha256": "d586beef10595c23c86476d3a433600778631ee9480343930394a9eb1a5b3278"
+    },
+    {
+      "file": "system/physmem.c",
+      "sha256": "1f7260aedc1d859af899264fa0f68eb2b2eee958c550ecc39534618e8bf70ed3"
+    },
+    {
+      "file": "target/xtensa/helper.c",
+      "sha256": "6b55e75f20f9d6f2f7ba4aba8b8fc3b7e7026a59b6f5467b5bba5c545b341a2a"
+    },
+    {
+      "file": "target/xtensa/helper.h",
+      "sha256": "98c75bcbdec2a7391fab20acfab37a47352a2a9a0aa02e532fb6d758a31b9f82"
+    },
+    {
+      "file": "target/xtensa/translate.c",
+      "sha256": "43aa4672c20b1fdac3aec4acbca3a646ac98f19fad28c623a929b87062b02f63"
+    },
+    {
+      "file": "target/xtensa/translate.h",
+      "sha256": "2aceafa88457c2de2c45e24c5953102a387fc5ab73840f4fc9f4a5970dc98e8d"
+    },
+    {
+      "file": "tcg/i386/tcg-target.c.inc",
+      "sha256": "0c406566023559ba145024afebd0200ad3e0bfc0e7817ee287bfa157f3a85382"
+    },
+    {
+      "file": "tcg/tcg.c",
+      "sha256": "d31e26697d850ae5eda8d5a4802de9d0b28987543d047668d15e126d213663f3"
+    },
+    {
+      "file": "util/qemu-timer.c",
+      "sha256": "2d10715c87bdf4daaddbcad0608eb85bede97d42dbecc7e6b6c3228d78356f27"
+    },
+    {
+      "file": "hw/dma/esp_gdma.c",
+      "sha256": "9b5a85e61f42fac8b28ac4939a43f20fadbdb2ef204fa00cff87415a1c1db52f"
+    },
+    {
+      "file": "system/main.c",
+      "sha256": "1fd12c5c81ffed45623bf9638759f30e213d67c7657c590e104ad2cc402718b9"
+    },
+    {
+      "file": "meson_options.txt",
+      "sha256": "799585acb6b811840ca641cf341869be9506c37a59043b5eb2c3fee63b0918c8"
+    }
+  ],
+  "binary_sha256": "b4e32b6f1ce8b09bad3f847b0dbceab4c7a49baa6bc5c0e1cb184b0fb7d8e560",
+  "bridge_sha256": "e88267ff5a28f0310d7055a8210d12630ea86bda0835a5f8cd0949a6e7ae6037",
+  "experimental": true,
+  "status": "Locally verified PGO performance profile: ABBA fixed-work +9.2 percent, exact output SHA; full-track MP3 with12ms preemption at120 percent; sustained Asteroids Audio1.186x. Desktop Null audio/control/reset acceptance passed. One-core realtime and broad untested peripherals are not guaranteed; Disk geometry remains a limitation.",
+  "build_options": {
+    "debug": true,
+    "optimization": "3",
+    "b_pgo": "use",
+    "b_ndebug": "false",
+    "b_lto": true,
+    "b_lto_threads": 2,
+    "x86_version": "1"
+  },
+  "full_hardware_coverage": false,
+  "performance_acceptance_verified": true
+}

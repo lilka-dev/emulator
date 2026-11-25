@@ -1,0 +1,38 @@
+--- a/hw/xtensa/lilka_board_probe.c
++++ b/hw/xtensa/lilka_board_probe.c
+@@ -59,6 +59,7 @@
+     uint64_t (*irq_bits)(LilkaBridge *, uint32_t);
+     void (*finish)(LilkaBridge *);
+     LilkaWindow windows[8];
++    LilkaWindow wifi_windows[6];
+ } bridge;
+ /* C owns these banks; x86 native JIT aligned 32-bit accesses are atomic and
+  * retain TCG memory barriers. All C accesses use qatomic. Commands and non-word
+@@ -503,7 +504,7 @@
+     bridge.stop_ns = stop ? g_ascii_strtoull(stop, NULL, 10) : 0;
+     const uint32_t bases[] = {0x60004000, 0x60019000, 0x6000f000,
+         0x6002d000, 0x6003f000, 0x60024000, 0x60025000, 0x60008800};
+-    uint32_t sizes[] = {0xa00, 0x100, 0x100, 0x100, 0x400, 0x100, 0x100, 0x4c};
++    uint32_t sizes[] = {0xa00, 0x100, 0x100, 0x100, 0x400, 0x100, 0x100, 0x58};
+     if (g_getenv("LILKA_QEMU_PAGE_SPI")) {
+         /* SPI2/3 each occupy an otherwise unimplemented 4-KiB block. Covering
+          * the complete block avoids QEMU's byte-granular subpage router. The
+@@ -519,6 +520,18 @@
+         memory_region_init_io(&window->mr, NULL, &lilka_ops, window,
+                               "lilka.board", sizes[i]);
+         memory_region_add_subregion_overlap(memory, bases[i], &window->mr, 10);
++    }
++    if (g_getenv("LILKA_QEMU_WIFI_SSID")) {
++        const uint32_t wifi_bases[] = {0x60033000, 0x6003500c, 0x60035118,
++                                      0x60035128, 0x6000e000, 0x60006174};
++        const uint32_t wifi_sizes[] = {0x2000, 0x14, 8, 4, 0x1000, 4};
++        for (size_t i = 0; i < ARRAY_SIZE(wifi_bases); ++i) {
++            LilkaWindow *window = &bridge.wifi_windows[i];
++            window->base = wifi_bases[i];
++            memory_region_init_io(&window->mr, NULL, &lilka_ops, window,
++                                  "lilka.wifi", wifi_sizes[i]);
++            memory_region_add_subregion_overlap(memory, wifi_bases[i], &window->mr, 10);
++        }
+     }
+     /* Eligibility boundaries: command/DMA-triggering accesses must stay on
+      * QEMU's precise I/O path, even when the FIFO fast path is enabled. */

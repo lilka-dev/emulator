@@ -1,0 +1,153 @@
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -54,6 +54,7 @@
+ #include "exec/log.h"
+ #include "tcg/tcg-ldst.h"
+ #include "tcg/tcg-temp-internal.h"
++#include "tcg/lilka-inline-io.h"
+ #include "tcg-internal.h"
+ #include "tcg/perf.h"
+ #ifdef CONFIG_USER_ONLY
+@@ -102,6 +103,9 @@
+     tcg_insn_unit *label_ptr[2]; /* label pointers to be updated */
+     QSIMPLEQ_ENTRY(TCGLabelQemuLdst) next;
+ } TCGLabelQemuLdst;
++
++/* Zero unless a fixed, identity-mapped Lilka SPI board opts in before boot. */
++LilkaInlineIO lilka_inline_io;
+ 
+ static void tcg_register_jit_int(const void *buf, size_t size,
+                                  const void *debug_frame,
+--- a/tcg/i386/tcg-target.c.inc
++++ b/tcg/i386/tcg-target.c.inc
+@@ -2052,6 +2052,98 @@
+ /*
+  * Generate code for the slow path for a load at the end of block
+  */
++/* Only the MMIO/TLB-miss path gets this stub: ordinary RAM hits retain their
++ * original generated code. L0/L1 are already reserved by softmmu constraints;
++ * guest address and store-data inputs never alias them. A failed guard falls
++ * through to the untouched helper path with those inputs still intact.
++ */
++static void tcg_out_lilka_spi(TCGContext *s, TCGLabelQemuLdst *l)
++{
++#if TCG_TARGET_REG_BITS == 64
++    MemOp opc = get_memop(l->oi);
++    if (!tcg_use_softmmu || !lilka_inline_io.banks || l->type != TCG_TYPE_I32 ||
++        (opc & (MO_SIZE | MO_BSWAP)) != MO_32 ||
++        (s->gen_tb->cflags & (CF_SINGLE_STEP | CF_MEMI_ONLY))) {
++        return;
++    }
++#ifdef CONFIG_PLUGIN
++    if (s->plugin_tb) {
++        return;
++    }
++#endif
++    TCGLabel *slow = gen_new_label();
++    TCGLabel *permitted = gen_new_label();
++    tcg_out_mov(s, TCG_TYPE_I32, TCG_REG_L1, l->addrlo_reg);
++    tgen_arithi(s, ARITH_SUB, TCG_REG_L1, 0x60024000, 0);
++    tcg_out_brcond(s, 0, TCG_COND_GTU, TCG_REG_L1, 0x1fff, true, slow, false);
++    tcg_out_mov(s, TCG_TYPE_I32, TCG_REG_L0, TCG_REG_L1);
++    tgen_arithi(s, ARITH_AND, TCG_REG_L0, 0xfff, 0);
++    if (!l->is_ld) {
++        /* Offset zero starts a transfer: always use the precise I/O helper. */
++        tgen_arithi(s, ARITH_SUB, TCG_REG_L0, 4, 0);
++    }
++    tcg_out_brcond(s, 0, TCG_COND_GTU, TCG_REG_L0,
++                   l->is_ld ? 0xfc : 0xf8, true, slow, false);
++    tgen_arithi(s, ARITH_AND, TCG_REG_L0, 3, 0);
++    tcg_out_brcond(s, 0, TCG_COND_NE, TCG_REG_L0, 0, true, slow, false);
++
++    /* S3 uses identity region protection. Recheck both physical region and
++     * the exact R/W permission set from region_attr_to_access on every access.
++     * A changed mapping/denied access goes through normal precise MMU faults.
++     */
++    tcg_out_ld(s, TCG_TYPE_I32, TCG_REG_L0, TCG_AREG0,
++               lilka_inline_io.region_paddr_offset);
++    tcg_out_brcond(s, 0, TCG_COND_NE, TCG_REG_L0, 0x60000000, true, slow, false);
++    tcg_out_modrm_offset(s, OPC_MOVZBL, TCG_REG_L0, TCG_AREG0,
++                         lilka_inline_io.region_attr_offset);
++    tgen_arithi(s, ARITH_AND, TCG_REG_L0, 15, 0);
++    tcg_out_brcond(s, 0, TCG_COND_LEU, TCG_REG_L0, 2, true, permitted, false);
++    tgen_arithi(s, ARITH_SUB, TCG_REG_L0, 4, 0);
++    tcg_out_brcond(s, 0, TCG_COND_LEU, TCG_REG_L0, 1, true, permitted, false);
++    tcg_out_brcond(s, 0, TCG_COND_NE, TCG_REG_L0, 10, true, slow, false);
++    tcg_out_label(s, permitted);
++    /* Guest RTOS stack watchpoints are common. Only watchpoints intersecting
++     * these SPI pages require the precise helper; include both read/write and
++     * all flag combinations conservatively. Watchpoint ranges cannot wrap
++     * (cpu_watchpoint_insert validates this). Icount serializes list updates.
++     */
++    TCGLabel *watch_loop = gen_new_label();
++    TCGLabel *watch_next = gen_new_label();
++    TCGLabel *watch_done = gen_new_label();
++    tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_L0, TCG_AREG0,
++               lilka_inline_io.watchpoints_offset);
++    tcg_out_label(s, watch_loop);
++    tcg_out_brcond(s, P_REXW, TCG_COND_EQ, TCG_REG_L0, 0, true, watch_done, false);
++    tcg_out_ld(s, TCG_TYPE_I64, TCG_REG_L1, TCG_REG_L0,
++               lilka_inline_io.watch_addr_offset);
++    tcg_out_brcond(s, P_REXW, TCG_COND_GTU, TCG_REG_L1, 0x60025fff,
++                   true, watch_next, false);
++    tcg_out_modrm_offset(s, OPC_ADD_GvEv | P_REXW, TCG_REG_L1, TCG_REG_L0,
++                         lilka_inline_io.watch_len_offset);
++    tgen_arithi(s, ARITH_SUB | P_REXW, TCG_REG_L1, 1, 1);
++    tcg_out_brcond(s, P_REXW, TCG_COND_GEU, TCG_REG_L1, 0x60024000,
++                   true, slow, false);
++    tcg_out_label(s, watch_next);
++    tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_L0, TCG_REG_L0,
++               lilka_inline_io.watch_next_offset);
++    tcg_out_jxx(s, JCC_JMP, watch_loop, false);
++    tcg_out_label(s, watch_done);
++    tcg_out_mov(s, TCG_TYPE_I32, TCG_REG_L1, l->addrlo_reg);
++    tgen_arithi(s, ARITH_SUB, TCG_REG_L1, 0x60024000, 0);
++
++    tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_L0, lilka_inline_io.banks);
++    tcg_out_modrm_sib_offset(s, OPC_LEA | P_REXW, TCG_REG_L0,
++                             TCG_REG_L0, TCG_REG_L1, 0, 0);
++    if (l->is_ld) {
++        tcg_out_ld(s, TCG_TYPE_I32, l->datalo_reg, TCG_REG_L0, 0);
++    } else {
++        tcg_out_st(s, TCG_TYPE_I32, l->datalo_reg, TCG_REG_L0, 0);
++    }
++    tcg_out_jmp(s, l->raddr);
++    tcg_out_label(s, slow);
++#endif
++}
++
+ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+ {
+     MemOp opc = get_memop(l->oi);
+@@ -2063,6 +2155,7 @@
+         tcg_patch32(label_ptr[1], s->code_ptr - label_ptr[1] - 4);
+     }
+ 
++    tcg_out_lilka_spi(s, l);
+     tcg_out_ld_helper_args(s, l, &ldst_helper_param);
+     tcg_out_branch(s, 1, qemu_ld_helpers[opc & MO_SIZE]);
+     tcg_out_ld_helper_ret(s, l, false, &ldst_helper_param);
+@@ -2085,6 +2178,7 @@
+         tcg_patch32(label_ptr[1], s->code_ptr - label_ptr[1] - 4);
+     }
+ 
++    tcg_out_lilka_spi(s, l);
+     tcg_out_st_helper_args(s, l, &ldst_helper_param);
+     tcg_out_branch(s, 1, qemu_st_helpers[opc & MO_SIZE]);
+ 
+--- /dev/null
++++ b/include/tcg/lilka-inline-io.h
+@@ -0,0 +1,13 @@
++/* Experimental fixed-board SPI bank descriptor. SPDX-License-Identifier: MIT */
++#ifndef LILKA_INLINE_IO_H
++#define LILKA_INLINE_IO_H
++#include <stdint.h>
++typedef struct LilkaInlineIO {
++    uintptr_t banks;
++    intptr_t region_attr_offset;
++    intptr_t region_paddr_offset;
++    intptr_t watchpoints_offset;
++    intptr_t watch_addr_offset, watch_len_offset, watch_next_offset;
++} LilkaInlineIO;
++extern LilkaInlineIO lilka_inline_io;
++#endif

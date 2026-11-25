@@ -1,0 +1,80 @@
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -1260,9 +1260,20 @@
+                                           mmu_idx, retaddr);
+ }
+ 
++/* Optional board contract for stored register data with no clock, interrupt,
++ * mapping, or DMA effects. Defaults to the normal QEMU I/O boundary policy.
++ * The callback only inspects immutable region metadata under the caller's RCU.
++ */
++bool (*lilka_tcg_clockless_store)(MemoryRegion *, hwaddr, unsigned);
++bool (*lilka_tcg_clockless_load)(MemoryRegion *, hwaddr, unsigned);
++/* can_do_io is false only in the single-host-thread icount execution mode.
++ * Counters are read after vm_shutdown, never concurrently with that worker. */
++uint64_t lilka_tcg_clockless_stores, lilka_tcg_clockless_loads;
++
+ static MemoryRegionSection *
+ io_prepare(hwaddr *out_offset, CPUState *cpu, hwaddr xlat,
+-           MemTxAttrs attrs, vaddr addr, uintptr_t retaddr)
++           MemTxAttrs attrs, vaddr addr, uintptr_t retaddr,
++           unsigned size, bool is_write)
+ {
+     MemoryRegionSection *section;
+     hwaddr mr_offset;
+@@ -1270,8 +1281,18 @@
+     section = iotlb_to_section(cpu, xlat, attrs);
+     mr_offset = (xlat & TARGET_PAGE_MASK) + addr;
+     cpu->mem_io_pc = retaddr;
++    bool (*clockless)(MemoryRegion *, hwaddr, unsigned) =
++        is_write ? lilka_tcg_clockless_store : lilka_tcg_clockless_load;
+     if (!cpu->neg.can_do_io) {
+-        cpu_io_recompile(cpu, retaddr);
++        if (size && clockless && clockless(section->mr, mr_offset, size)) {
++            if (is_write) {
++                lilka_tcg_clockless_stores++;
++            } else {
++                lilka_tcg_clockless_loads++;
++            }
++        } else {
++            cpu_io_recompile(cpu, retaddr);
++        }
+     }
+ 
+     *out_offset = mr_offset;
+@@ -1976,7 +1997,7 @@
+     tcg_debug_assert(size > 0 && size <= 8);
+ 
+     attrs = full->attrs;
+-    section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
++    section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra, size, false);
+     mr = section->mr;
+ 
+     BQL_LOCK_GUARD();
+@@ -1997,7 +2018,7 @@
+     tcg_debug_assert(size > 8 && size <= 16);
+ 
+     attrs = full->attrs;
+-    section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
++    section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra, 0, false);
+     mr = section->mr;
+ 
+     BQL_LOCK_GUARD();
+@@ -2517,7 +2538,7 @@
+     tcg_debug_assert(size > 0 && size <= 8);
+ 
+     attrs = full->attrs;
+-    section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
++    section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra, size, true);
+     mr = section->mr;
+ 
+     BQL_LOCK_GUARD();
+@@ -2537,7 +2558,7 @@
+     tcg_debug_assert(size > 8 && size <= 16);
+ 
+     attrs = full->attrs;
+-    section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
++    section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra, 0, true);
+     mr = section->mr;
+ 
+     BQL_LOCK_GUARD();

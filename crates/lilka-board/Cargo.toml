@@ -1,0 +1,13 @@
+[package]
+name = "lilka-board"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memmap2 = { version = "=0.9.12" }
+fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }

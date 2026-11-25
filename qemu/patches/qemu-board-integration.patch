@@ -1,0 +1,568 @@
+--- a/hw/xtensa/meson.build
++++ b/hw/xtensa/meson.build
+@@ -12,6 +12,7 @@
+   'esp32s3_clk.c',
+   'esp32s3_intc.c',
+   'esp32s3.c',
++  'lilka_board_probe.c',
+ ))
+ 
+ hw_arch += {'xtensa': xtensa_ss}
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -884,6 +884,8 @@
+         memory_region_add_subregion(sys_mem, 0x60019000, ledc_probe);
+     }
+ 
++    void lilka_qemu_board_init(MemoryRegion *, DeviceState *);
++    lilka_qemu_board_init(sys_mem, intmatrix_dev);
+     esp32s3_machine_init_sd(ss);
+ 
+     /* Need MMU initialized prior to ELF loading,
+--- /dev/null
++++ b/hw/xtensa/lilka_board_probe.c
+@@ -0,0 +1,544 @@
++/* Experimental Lilka device adapter for the Espressif QEMU board.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/error-report.h"
++#include "qemu/timer.h"
++#include "qemu/lilka-clock.h"
++#include "qemu/rcu.h"
++#include "qemu/main-loop.h"
++#include "exec/address-spaces.h"
++#include "exec/memory.h"
++#include "hw/qdev-core.h"
++#include "hw/irq.h"
++#include "sysemu/runstate.h"
++#include "sysemu/cpu-timers.h"
++#include "qemu/atomic.h"
++#include "tcg/lilka-inline-io.h"
++#include "cpu.h"
++#include <dlfcn.h>
++
++typedef struct LilkaBridge LilkaBridge;
++typedef int (*RamRead)(void *, uint32_t, uint8_t *, size_t);
++typedef int (*RamWrite)(void *, uint32_t, const uint8_t *, size_t);
++typedef struct LilkaWindow {
++    MemoryRegion mr;
++    uint32_t base;
++} LilkaWindow;
++static struct {
++    LilkaBridge *board;
++    void *library;
++    DeviceState *interrupts;
++    QEMUTimer *timer;
++    QEMUTimer *live_timer;
++    uint32_t (*wants_run)(LilkaBridge *);
++    void (*live_status)(LilkaBridge *, uint32_t);
++    uint64_t stop_ns;
++    uint64_t audio_callbacks, audio_late_100us, audio_late_1ms, audio_max_late_ns;
++    void (*profile_gate)(int);
++    bool profile_started, profile_stopped;
++    bool clockless_spi;
++    bool clockless_reads;
++    bool inline_spi;
++    bool clockless_pio;
++    bool spi_eventless;
++    uint64_t spi_eventless_commands, spi_eventless_pio;
++    uint64_t clock_limit_requests, clock_limit_updates;
++    int64_t service_fence;
++    int64_t service_pending_limit;
++    bool service_pending, service_limit_set;
++    int (*spi_sync)(LilkaBridge *, uint32_t, uint32_t *, uint32_t);
++    uint64_t irq[2];
++    uint32_t (*read)(LilkaBridge *, uint32_t, uint8_t, uint64_t);
++    void (*write)(LilkaBridge *, uint32_t, uint8_t, uint32_t, uint64_t);
++    void (*tick)(LilkaBridge *, uint64_t);
++    void (*reset)(LilkaBridge *, uint64_t);
++    void (*peripheral_reset)(LilkaBridge *, uint32_t, uint32_t, uint64_t);
++    uint64_t (*next_event)(LilkaBridge *, uint64_t);
++    uint32_t (*audio_irq_pending)(const LilkaBridge *);
++    uint64_t (*irq_bits)(LilkaBridge *, uint32_t);
++    void (*finish)(LilkaBridge *);
++    LilkaWindow windows[8];
++} bridge;
++/* C owns these banks; x86 native JIT aligned 32-bit accesses are atomic and
++ * retain TCG memory barriers. All C accesses use qatomic. Commands and non-word
++ * fallbacks hold BQL and exchange separate stack copies with Rust, which never
++ * borrows the concurrently accessible C bank. A command snapshots configuration
++ * once and commits only changed RX/status words, preserving concurrent config
++ * writes. The device timers never touch these banks. */
++static uint32_t inline_spi_banks[2][1024] QEMU_ALIGNED(64);
++extern unsigned lilka_clock_rate_percent;
++extern uint64_t lilka_fill16_pixels, lilka_fill16_calls;
++extern uint64_t lilka_rom_udiv_calls, lilka_rom_udiv_zeroes;
++extern bool (*lilka_tcg_clockless_store)(MemoryRegion *, hwaddr, unsigned);
++extern bool (*lilka_tcg_clockless_load)(MemoryRegion *, hwaddr, unsigned);
++extern uint64_t lilka_tcg_clockless_stores, lilka_tcg_clockless_loads;
++static const MemoryRegionOps lilka_ops;
++static bool lilka_clockless_store(MemoryRegion *mr, hwaddr offset, unsigned size)
++{
++    if (mr->ops != &lilka_ops || size != 4 || (offset & 3)) {
++        return false;
++    }
++    const LilkaWindow *window = mr->opaque;
++    if (window->base == 0x60024000 || window->base == 0x60025000) {
++        if (bridge.clockless_spi && offset >= 4 && offset <= 0xfc) {
++            return true;
++        }
++        /* FIFO-only command execution in this board model neither accesses
++         * guest RAM nor raises CPU IRQs. DMA commands retain precise exits.
++         * The bank belongs to the serialized icount CPU; no I/O timer writes it.
++         */
++        if (bridge.clockless_pio && offset == 0 &&
++            !(qatomic_read(&inline_spi_banks[window->base == 0x60025000][0x30 / 4]) &
++              ((1u << 27) | (1u << 28)))) {
++            return true;
++        }
++
++    }
++    return false;
++}
++static bool lilka_clockless_load(MemoryRegion *mr, hwaddr offset, unsigned size)
++{
++    /* These exact device models only observe their stored state on reads:
++     * no FIFO consumption, read-to-clear IRQ, time query, or ADC progression.
++     * Timer/DMA state changes still occur at the normal icount event deadline.
++     */
++    return mr->ops == &lilka_ops && size == 4 && !(offset & 3) &&
++           offset < memory_region_size(mr);
++}
++
++/* BQL is held for all MMIO and timer callbacks, including with MTTCG. Every
++ * callback into Rust exclusively borrows one board. DMA must therefore never
++ * recurse into MMIO (including this board) while that borrow is active.
++ * Translate each whole range to RAM first, then let QEMU perform the actual
++ * access so writes retain its code invalidation and dirty tracking semantics.
++ */
++static int lilka_ram_rw(uint32_t address, uint8_t *bytes, size_t size, bool write)
++{
++    uint64_t cursor = address, end = cursor + size;
++    RCU_READ_LOCK_GUARD();
++    if (end > (1ULL << 32)) {
++        return -1;
++    }
++    while (cursor < end) {
++        hwaddr translated, length = end - cursor;
++        MemoryRegion *mr = address_space_translate(&address_space_memory,
++            cursor, &translated, &length, write, MEMTXATTRS_UNSPECIFIED);
++        if (!length || !memory_region_is_ram(mr) ||
++            memory_region_is_ram_device(mr) || (write && mr->readonly)) {
++            return -1;
++        }
++        cursor += length;
++    }
++    return address_space_rw(&address_space_memory, address,
++        MEMTXATTRS_UNSPECIFIED, bytes, size, write) == MEMTX_OK ? 0 : -1;
++}
++static int lilka_ram_read(void *opaque, uint32_t address, uint8_t *bytes, size_t size)
++{
++    return lilka_ram_rw(address, bytes, size, false);
++}
++static int lilka_ram_write(void *opaque, uint32_t address, const uint8_t *bytes, size_t size)
++{
++    return lilka_ram_rw(address, (uint8_t *)bytes, size, true);
++}
++static uint64_t lilka_ticks(void)
++{
++    uint64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    return ns / 1000 * 240 + ns % 1000 * 240 / 1000;
++}
++static void lilka_schedule(void)
++{
++    uint64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    uint64_t deadline = now_ns + 1000000;
++    uint64_t ticks = bridge.next_event(bridge.board, lilka_ticks());
++    int64_t fence = INT64_MAX;
++    if (ticks != UINT64_MAX) {
++        /* Ceil to ns: never wake before the requested output frame. */
++        uint64_t ns = ticks / 240 * 1000 + (ticks % 240 * 1000 + 239) / 240;
++        deadline = MIN(deadline, MAX(ns, now_ns + 1));
++        /* Match the minimum timer re-arm exactly. A fence at now with the
++         * timer at now+1 would prevent that timer from ever becoming due. */
++        fence = MAX(ns, now_ns + 1);
++    }
++    if (lilka_service_clock_enabled()) {
++        bridge.clock_limit_requests++;
++        bool pending = (bridge.irq[1] & (UINT64_C(31) << 7)) &&
++                       bridge.audio_irq_pending &&
++                       bridge.audio_irq_pending(bridge.board);
++        if (pending && (!bridge.service_limit_set || !bridge.service_pending)) {
++            /* Ordinary IRQ dispatch takes time while the peripheral keeps
++             * running. Pause only a longer service delay, not every ISR.
++             * Keep this bound anchored to the start of the pending epoch.
++             */
++            bridge.service_pending_limit = now_ns + 100000;
++        }
++        int64_t limit = pending ? MIN(fence, bridge.service_pending_limit) : fence;
++        if (!bridge.service_limit_set || bridge.service_fence != limit ||
++            bridge.service_pending != pending) {
++            lilka_service_clock_limit(limit, pending);
++            bridge.service_fence = limit;
++            bridge.service_pending = pending;
++            bridge.service_limit_set = true;
++            bridge.clock_limit_updates++;
++        }
++    }
++    /* Register traffic may bring a deadline forward, never postpone a timer
++     * already armed earlier. Otherwise continuous SPI writes starve inputs
++     * and audio indefinitely by repeatedly moving the 1-ms wakeup forward.
++     */
++    if (!timer_pending(bridge.timer) || deadline < timer_expire_time_ns(bridge.timer)) {
++        timer_mod(bridge.timer, deadline);
++    }
++}
++static void lilka_update_irqs(void)
++{
++    for (unsigned high = 0; high < 2; high++) {
++        uint64_t bits = bridge.irq_bits(bridge.board, high);
++        uint64_t changed = bits ^ bridge.irq[high];
++        while (changed) {
++            unsigned bit = ctz64(changed);
++            qemu_set_irq(qdev_get_gpio_in(bridge.interrupts, high * 64 + bit),
++                         (bits >> bit) & 1);
++            changed &= changed - 1;
++        }
++        bridge.irq[high] = bits;
++    }
++}
++static uint64_t lilka_read(void *opaque, hwaddr offset, unsigned size)
++{
++    assert(bql_locked());
++    LilkaWindow *window = opaque;
++    if (bridge.inline_spi && size == 4 && !(offset & 3) && offset < 0x100 &&
++        (window->base == 0x60024000 || window->base == 0x60025000)) {
++        return qatomic_read(&inline_spi_banks[window->base == 0x60025000][offset / 4]);
++    }
++    /* Non-word reads must observe the same bank as native word accesses. */
++    if (bridge.inline_spi &&
++        (window->base == 0x60024000 || window->base == 0x60025000)) {
++        unsigned index = window->base == 0x60025000;
++        uint32_t words[64];
++        for (unsigned i = 0; i < 64; i++) {
++            words[i] = qatomic_read(&inline_spi_banks[index][i]);
++        }
++        if (bridge.spi_sync(bridge.board, index, words, 1) != 0) { abort(); }
++    }
++    bool clockless = bridge.clockless_reads && lilka_clockless_load(&window->mr, offset, size);
++    return bridge.read(bridge.board, window->base + offset, size,
++                       clockless ? 0 : lilka_ticks());
++}
++static void lilka_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++{
++    assert(bql_locked());
++    LilkaWindow *window = opaque;
++    bool spi_window = bridge.inline_spi &&
++                    (window->base == 0x60024000 || window->base == 0x60025000);
++    bool spi_word = spi_window && size == 4 && !(offset & 3) && offset < 0x100;
++    unsigned spi_index = window->base == 0x60025000;
++    uint32_t words[64], before[64];
++    if (spi_word && offset != 0) {
++        qatomic_set(&inline_spi_banks[spi_index][offset / 4], (uint32_t)value);
++        return;
++    }
++    if (spi_window) {
++        for (unsigned i = 0; i < 64; i++) {
++            words[i] = qatomic_read(&inline_spi_banks[spi_index][i]);
++        }
++        memcpy(before, words, sizeof(before));
++        if (bridge.spi_sync(bridge.board, spi_index, words, 1) != 0) { abort(); }
++        if (spi_word && offset == 0) {
++            /* Other CPUs can poll busy while this synchronous model runs. */
++            qatomic_set(&inline_spi_banks[spi_index][0], (uint32_t)value);
++        }
++    }
++    bool clockless = lilka_clockless_store(&window->mr, offset, size);
++    bool eventless_spi = bridge.spi_eventless &&
++        (window->base == 0x60024000 || window->base == 0x60025000);
++    /* The stored SPI data/configuration path does not use now. Commands still
++     * leave the TB at the precise instruction before consuming any register.
++     */
++    bridge.write(bridge.board, window->base + offset, size, value,
++                 (clockless || eventless_spi) ? 0 : lilka_ticks());
++    if (spi_window) {
++        if (bridge.spi_sync(bridge.board, spi_index, words, 0) != 0) { abort(); }
++        for (unsigned i = 0; i < 64; i++) {
++            if (words[i] != before[i] || (i == 0 && spi_word && offset == 0)) {
++                qatomic_set(&inline_spi_banks[spi_index][i], words[i]);
++            }
++        }
++    }
++
++    if (clockless) {
++        return;
++    }
++    /* SPI completion is synchronous in this model. It may change a GDMA IRQ,
++     * but cannot change the independent I2S clock/format/descriptor deadline.
++     * Command accesses remain strict TCG IO; this only removes unused model
++     * timestamps and unrelated audio scheduling from the BQL callback.
++     */
++    if ((window->base == 0x60024000 || window->base == 0x60025000) && offset != 0) {
++        return;
++    }
++    if (eventless_spi) {
++        bridge.spi_eventless_commands++;
++        if (spi_window && !(words[0x30 / 4] & (3u << 27))) {
++            bridge.spi_eventless_pio++;
++            return;
++        }
++    }
++    lilka_update_irqs();
++    if (!eventless_spi) {
++        lilka_schedule();
++    }
++}
++static const MemoryRegionOps lilka_ops = {
++    .read = lilka_read, .write = lilka_write, .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 4 },
++    .impl = { .min_access_size = 1, .max_access_size = 4 },
++};
++/* The host control clock keeps running while the guest virtual clock pauses. */
++static void lilka_live_control(void *opaque)
++{
++    assert(bql_locked());
++    bool wants_run = bridge.wants_run(bridge.board) != 0;
++    if (!wants_run && runstate_is_running()) {
++        vm_stop(RUN_STATE_PAUSED);
++    } else if (wants_run && (runstate_check(RUN_STATE_PAUSED) || runstate_check(RUN_STATE_PRELAUNCH))) {
++        vm_start();
++    }
++    bridge.live_status(bridge.board, runstate_is_running() ? 1 : 2);
++    timer_mod(bridge.live_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 5000000);
++}
++
++static void lilka_tick(void *opaque)
++{
++    assert(bql_locked());
++    uint64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    if (bridge.profile_gate && !bridge.profile_started && now_ns >= 17000000000ULL) {
++        bridge.profile_gate(1);
++        bridge.profile_started = true;
++        fprintf(stderr, "Lilka profile start virtual_ns=%" PRIu64 "\n", now_ns);
++    }
++    if (bridge.profile_gate && !bridge.profile_stopped && now_ns >= 23000000000ULL) {
++        bridge.profile_gate(0);
++        bridge.profile_stopped = true;
++        fprintf(stderr, "Lilka profile stop virtual_ns=%" PRIu64 "\n", now_ns);
++    }
++    uint64_t audio_due = bridge.next_event(bridge.board, lilka_ticks());
++    if (audio_due != UINT64_MAX) {
++        uint64_t due_ns = audio_due / 240 * 1000 +
++                          (audio_due % 240 * 1000 + 239) / 240;
++        uint64_t late = now_ns > due_ns ? now_ns - due_ns : 0;
++        bridge.audio_callbacks++;
++        bridge.audio_late_100us += late > 100000;
++        bridge.audio_late_1ms += late > 1000000;
++        bridge.audio_max_late_ns = MAX(bridge.audio_max_late_ns, late);
++    }
++    bridge.tick(bridge.board, lilka_ticks());
++    lilka_update_irqs();
++    if (bridge.stop_ns && qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) >= bridge.stop_ns) {
++        qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_QMP_QUIT);
++        return;
++    }
++    lilka_schedule();
++}
++void lilka_qemu_board_reset(void);
++void lilka_qemu_board_peripheral_reset(unsigned bank, uint32_t mask);
++void lilka_qemu_board_peripheral_reset(unsigned bank, uint32_t mask)
++{
++    if (!bridge.board) {
++        return;
++    }
++    assert(bql_locked());
++    bridge.peripheral_reset(bridge.board, bank == 0 ? mask : 0,
++                            bank == 1 ? mask : 0, lilka_ticks());
++    if (bank == 0) {
++        for (unsigned port = 0; port < 2; port++) {
++            if (mask & (1u << (port == 0 ? 6 : 16))) {
++                /* Only clear the selected C-owned bank. The other vCPU can
++                 * update the other bank without BQL; never copy stale Rust
++                 * register state over those concurrent writes. */
++                for (unsigned i = 0; i < 1024; i++) {
++                    qatomic_set(&inline_spi_banks[port][i], 0);
++                }
++            }
++        }
++    }
++    lilka_update_irqs();
++    lilka_schedule();
++}
++void lilka_qemu_board_reset(void)
++{
++    if (!bridge.board) {
++        return;
++    }
++    assert(bql_locked());
++    lilka_service_clock_limit(INT64_MAX, false);
++    bridge.service_limit_set = false;
++    bridge.reset(bridge.board, lilka_ticks());
++    for (unsigned port = 0; port < 2; port++) {
++        uint32_t words[64];
++        for (unsigned i = 0; i < 1024; i++) {
++            qatomic_set(&inline_spi_banks[port][i], 0);
++        }
++        if (bridge.spi_sync(bridge.board, port, words, 0) != 0) { abort(); }
++        for (unsigned i = 0; i < 64; i++) {
++            qatomic_set(&inline_spi_banks[port][i], words[i]);
++        }
++    }
++    lilka_update_irqs();
++    timer_mod(bridge.timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
++}
++static void lilka_finish(void)
++{
++    lilka_service_clock_report();
++    fprintf(stderr, "Lilka SPI eventless commands=%" PRIu64 " pio=%" PRIu64
++            " clock_limit_requests=%" PRIu64 " updates=%" PRIu64 "\n",
++            bridge.spi_eventless_commands, bridge.spi_eventless_pio,
++            bridge.clock_limit_requests, bridge.clock_limit_updates);
++    fprintf(stderr, "Lilka clockless TB stores=%" PRIu64 " loads=%" PRIu64 "\n",
++            lilka_tcg_clockless_stores, lilka_tcg_clockless_loads);
++    fprintf(stderr, "Lilka audio deadlines callbacks=%" PRIu64
++            " late100us=%" PRIu64 " late1ms=%" PRIu64
++            " max_late_ns=%" PRIu64 "\n",
++            bridge.audio_callbacks, bridge.audio_late_100us,
++            bridge.audio_late_1ms, bridge.audio_max_late_ns);
++    fprintf(stderr, "Lilka fill16 pixels=%" PRIu64 "\n", qatomic_read(&lilka_fill16_pixels));
++    fprintf(stderr, "Lilka fill16 calls=%" PRIu64 "\n", qatomic_read(&lilka_fill16_calls));
++    fprintf(stderr, "Lilka ROM udiv calls=%" PRIu64 " zero_compat=%" PRIu64 "\n",
++            qatomic_read(&lilka_rom_udiv_calls), qatomic_read(&lilka_rom_udiv_zeroes));
++    bridge.finish(bridge.board);
++    bridge.board = NULL;
++}
++void lilka_qemu_board_init(MemoryRegion *memory, DeviceState *interrupts);
++void lilka_qemu_board_init(MemoryRegion *memory, DeviceState *interrupts)
++{
++    const char *path = g_getenv("LILKA_QEMU_BOARD_LIBRARY");
++    if (!path) {
++        return;
++    }
++    bridge.library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++    if (!bridge.library) {
++        error_report("Lilka bridge: %s", dlerror());
++        exit(1);
++    }
++#define LOAD(field, symbol) do { \
++    bridge.field = dlsym(bridge.library, symbol); \
++    if (!bridge.field) { error_report("Missing Lilka symbol %s", symbol); exit(1); } \
++} while (0)
++    LOAD(read, "lilka_board_read");
++    LOAD(write, "lilka_board_write");
++    LOAD(tick, "lilka_board_tick");
++    LOAD(reset, "lilka_board_reset");
++    LOAD(peripheral_reset, "lilka_board_peripheral_reset");
++    LOAD(next_event, "lilka_board_next_event");
++    bridge.audio_irq_pending = dlsym(bridge.library, "lilka_board_audio_irq_pending");
++    LOAD(irq_bits, "lilka_board_irq");
++    LOAD(finish, "lilka_board_finish");
++    LOAD(spi_sync, "lilka_board_spi_sync");
++    LOAD(wants_run, "lilka_board_wants_run");
++    LOAD(live_status, "lilka_board_live_status");
++#undef LOAD
++    LilkaBridge *(*create)(void *, RamRead, RamWrite) =
++        dlsym(bridge.library, "lilka_board_create");
++    if (!create || !(bridge.board = create(NULL, lilka_ram_read, lilka_ram_write))) {
++        error_report("Cannot initialize Lilka board");
++        exit(1);
++    }
++    const char *rate = g_getenv("LILKA_QEMU_CLOCK_RATE");
++    if (rate) {
++        char *end;
++        unsigned long value = strtoul(rate, &end, 10);
++        if (!*rate || *end || value < 25 || value > 400 || icount_enabled()) {
++            error_report("Lilka clock rate requires 25..400 percent and no icount");
++            exit(1);
++        }
++        lilka_clock_rate_percent = value;
++    }
++    if (g_getenv("LILKA_QEMU_SERVICE_CLOCK")) {
++        if (icount_enabled() || !bridge.audio_irq_pending) {
++            error_report("Lilka service clock requires MTTCG/host time and an updated bridge");
++            exit(1);
++        }
++        lilka_service_clock_enable();
++    }
++    bridge.interrupts = interrupts;
++    bridge.inline_spi = g_getenv("LILKA_QEMU_INLINE_SPI") != NULL;
++    bridge.spi_eventless = g_getenv("LILKA_QEMU_SPI_EVENTLESS") != NULL;
++    bridge.clockless_pio = g_getenv("LILKA_QEMU_CLOCKLESS_PIO") != NULL;
++    if (bridge.clockless_pio && (!bridge.inline_spi || !icount_enabled())) {
++        error_report("Clockless PIO requires inline SPI banks and serialized icount");
++        exit(1);
++    }
++    if (bridge.inline_spi) {
++        CPUXtensaState *env = cpu_env(qemu_get_cpu(0));
++        if ((!icount_enabled() && !g_getenv("LILKA_QEMU_INLINE_SPI_HOST_CLOCK")) ||
++            !xtensa_option_enabled(env->config, XTENSA_OPTION_REGION_PROTECTION) ||
++            xtensa_option_enabled(env->config, XTENSA_OPTION_REGION_TRANSLATION) ||
++            xtensa_option_enabled(env->config, XTENSA_OPTION_MMU) ||
++            xtensa_option_enabled(env->config, XTENSA_OPTION_MPU)) {
++            error_report("Inline SPI requires explicit host-clock mode or icount, and the S3 identity region map");
++            exit(1);
++        }
++        lilka_inline_io = (LilkaInlineIO) {
++            .watch_addr_offset = offsetof(CPUWatchpoint, vaddr),
++            .watch_len_offset = offsetof(CPUWatchpoint, len),
++            .watch_next_offset = offsetof(CPUWatchpoint, entry.tqe_next),
++            .banks = (uintptr_t)inline_spi_banks,
++            .region_attr_offset = offsetof(CPUXtensaState, dtlb[0][3].attr),
++            .region_paddr_offset = offsetof(CPUXtensaState, dtlb[0][3].paddr),
++            .watchpoints_offset = (intptr_t)offsetof(XtensaCPU, parent_obj.watchpoints.tqh_first) -
++                                  (intptr_t)offsetof(XtensaCPU, env),
++        };
++    }
++    bridge.profile_gate = dlsym(RTLD_DEFAULT, "lilka_profile_gate");
++    bridge.clockless_spi = g_getenv("LILKA_QEMU_CLOCKLESS_SPI") != NULL;
++    if (bridge.clockless_spi) {
++        lilka_tcg_clockless_store = lilka_clockless_store;
++    }
++    bridge.clockless_reads = g_getenv("LILKA_QEMU_CLOCKLESS_READS") != NULL;
++    if (bridge.clockless_reads) {
++        lilka_tcg_clockless_load = lilka_clockless_load;
++    }
++    const char *stop = g_getenv("LILKA_QEMU_STOP_NS");
++    bridge.stop_ns = stop ? g_ascii_strtoull(stop, NULL, 10) : 0;
++    const uint32_t bases[] = {0x60004000, 0x60019000, 0x6000f000,
++        0x6002d000, 0x6003f000, 0x60024000, 0x60025000, 0x60008800};
++    uint32_t sizes[] = {0xa00, 0x100, 0x100, 0x100, 0x400, 0x100, 0x100, 0x4c};
++    if (g_getenv("LILKA_QEMU_PAGE_SPI")) {
++        /* SPI2/3 each occupy an otherwise unimplemented 4-KiB block. Covering
++         * the complete block avoids QEMU's byte-granular subpage router. The
++         * reserved tail keeps the original fallback semantics: read 0/ignore.
++         * Do not extend ADC: its page also contains RTC control and RTC IO.
++         */
++        sizes[5] = sizes[6] = 0x1000;
++    }
++
++    for (unsigned i = 0; i < ARRAY_SIZE(bases); i++) {
++        LilkaWindow *window = &bridge.windows[i];
++        window->base = bases[i];
++        memory_region_init_io(&window->mr, NULL, &lilka_ops, window,
++                              "lilka.board", sizes[i]);
++        memory_region_add_subregion_overlap(memory, bases[i], &window->mr, 10);
++    }
++    /* Eligibility boundaries: command/DMA-triggering accesses must stay on
++     * QEMU's precise I/O path, even when the FIFO fast path is enabled. */
++    assert(lilka_clockless_store(&bridge.windows[5].mr, 0, 4) == bridge.clockless_pio);
++    inline_spi_banks[0][0x30 / 4] = 1u << 27;
++    assert(!lilka_clockless_store(&bridge.windows[5].mr, 0, 4));
++    inline_spi_banks[0][0x30 / 4] = 1u << 28;
++    assert(!lilka_clockless_store(&bridge.windows[5].mr, 0, 4));
++    inline_spi_banks[0][0x30 / 4] = 0;
++    assert(!lilka_clockless_store(&bridge.windows[5].mr, 4, 1));
++    assert(!lilka_clockless_store(&bridge.windows[5].mr, 2, 4));
++    assert(!lilka_clockless_store(&bridge.windows[0].mr, 0x554, 4));
++    assert(!lilka_clockless_load(&bridge.windows[5].mr, 0, 8));
++    assert(lilka_clockless_store(&bridge.windows[5].mr, 4, 4) == bridge.clockless_spi);
++    assert(lilka_clockless_store(&bridge.windows[5].mr, 0xfc, 4) == bridge.clockless_spi);
++    bridge.timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, lilka_tick, NULL);
++    timer_mod(bridge.timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
++    if (g_getenv("LILKA_QEMU_LIVE_FILE")) {
++        bridge.live_timer = timer_new_ns(QEMU_CLOCK_REALTIME, lilka_live_control, NULL);
++        timer_mod(bridge.live_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 5000000);
++    }
++    atexit(lilka_finish);
++}
