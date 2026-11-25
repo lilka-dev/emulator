@@ -253,6 +253,9 @@ impl BoardDevice {
 }
 fn hardware_address(address: u32) -> bool {
     Hardware::handles(address)
+        || (0x6000e000..0x6000f000).contains(&address)
+        || (0x60031000..0x60033000).contains(&address)
+        || address == 0x60006174
         || (0x60019000..0x60019100).contains(&address)
         || (0x6000f000..0x6000f100).contains(&address)
         || (0x6002d000..0x6002d100).contains(&address)

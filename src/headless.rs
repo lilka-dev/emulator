@@ -36,6 +36,12 @@ pub fn run() -> Result<()> {
     };
     match scenario {
         "menu" | "reset" => {}
+        "multiboot" => {
+            key(7000, 41);
+            for ms in [7600, 8300, 9000] {
+                key(ms, 5);
+            }
+        }
         "catalog" => {
             key(15000, 5);
             key(15700, 41);
@@ -249,7 +255,8 @@ pub fn run() -> Result<()> {
     if scenario == "reset" {
         let board: serde_json::Value =
             serde_json::from_slice(&std::fs::read(session.directory.join("board.json"))?)?;
-        let uart = std::fs::read_to_string(session.directory.join("uart.log"))?;
+        let uart = String::from_utf8_lossy(&std::fs::read(session.directory.join("uart.log"))?)
+            .into_owned();
         ensure!(
             reset_done
                 && board["system_resets"].as_u64().unwrap_or(0) >= 1
@@ -257,9 +264,16 @@ pub fn run() -> Result<()> {
             "Guest did not reboot successfully"
         );
     }
-    let uart = std::fs::read_to_string(session.directory.join("uart.log"))?;
+    let uart =
+        String::from_utf8_lossy(&std::fs::read(session.directory.join("uart.log"))?).into_owned();
+    if scenario == "multiboot" {
+        ensure!(
+            uart.matches("ESP-ROM:").count() >= 2,
+            "KeiraOS did not boot the SD application"
+        );
+    }
     ensure!(
-        !uart.contains("Guru Meditation"),
+        !uart.contains("Guru Meditation") && !uart.contains("PANIC:"),
         "Guest firmware crashed; inspect uart.log"
     );
     session.ipc.drain_audio(&mut audio);

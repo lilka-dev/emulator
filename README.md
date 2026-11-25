@@ -9,81 +9,85 @@
 
 ## Збірка — Linux x86-64
 
-Потрібні Python 3.12+, актуальний Rust stable через rustup, компілятори C/C++, Make, Ninja, Git, `patch`, `pkg-config` та бібліотеки нижче. Для запуску потрібен графічний сеанс X11 або Wayland. Перша збірка потребує інтернету для завантаження Rust-залежностей, вихідників QEMU та ROM ESP32-S3.
+### Переносний пакет
 
-### 1. Системні залежності
+GitHub Actions збирає пакет на Ubuntu 22.04 з базовою glibc 2.35 і набором інструкцій x86-64-v1. Потрібні бібліотеки додаються в `lib/`; glibc і графічні драйвери залишаються системними. Потрібен Linux x86-64 з glibc 2.35+ та сеанс X11 або Wayland.
 
-Команди для Ubuntu 24.04. На інших дистрибутивах назви пакетів відрізняються; Python має відповідати вимозі вище.
+Артефакт GitHub містить `lilka-emulator-linux-x86_64.tar.gz`. Розпакуйте саме цей архів: він зберігає право на виконання програми.
+
+```sh
+tar -xzf lilka-emulator-linux-x86_64.tar.gz
+./lilka-emulator/lilka-emulator
+```
+
+Копіювати потрібно весь каталог. Прошивки та SD користувач додає сам. Список бібліотек і мінімальна glibc записуються в `runtime.json`, ліцензії — у `LICENSES/`.
+
+Такий самий пакет можна зібрати через Docker BuildKit з будь-якого Linux-дистрибутива:
+
+```sh
+docker build --file packaging/Dockerfile --output type=local,dest=dist .
+./dist/lilka-emulator/lilka-emulator
+```
+
+`--build-arg JOBS=2` обмежує паралельність у контейнері. Каталог `dist/` має належати користувачу, який запускає збірку.
+
+### Локальна збірка
+
+Потрібні Python 3.9+ з актуальними виправленнями безпеки, Rust stable через rustup, C/C++, Make, Ninja, `patch`, `pkg-config` і заголовки GLib, Pixman та libgcrypt. Python-оточення QEMU створюється автоматично; Meson і pycotap постачаються в його зафіксованих вихідниках. Перша збірка потребує інтернету.
+
+Ubuntu / Debian:
 
 ```sh
 sudo apt update
-sudo apt install -y \
+sudo apt install --no-install-recommends \
   build-essential binutils git patch curl ca-certificates ninja-build pkg-config \
-  python3 python3-dev python3-venv python3-pip python3-setuptools \
-  python3-packaging python3-distlib \
-  libglib2.0-dev libpixman-1-dev libgcrypt20-dev libfdt-dev zlib1g-dev \
-  libasound2-dev libudev-dev libwayland-dev \
-  libx11-dev libx11-xcb-dev libxcursor-dev libxi-dev libxrandr-dev \
-  libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-  libxkbcommon-dev libxkbcommon-x11-dev
+  python3 python3-venv python3-pip libglib2.0-dev libpixman-1-dev libgcrypt20-dev
 ```
 
-Meson 1.5.0 і pycotap постачаються разом із зафіксованими вихідниками QEMU та встановлюються його скриптом у власне Python-оточення `pyvenv`. Окремо встановлювати їх через `sudo pip` не потрібно.
+openSUSE Tumbleweed:
 
-### 2. Rust
+```sh
+sudo zypper install gcc gcc-c++ make binutils git patch curl ca-certificates \
+  ninja pkgconf-pkg-config python3 python3-pip glib2-devel libpixman-1-0-devel libgcrypt-devel
+```
 
-Якщо Rust ще не встановлений, встановіть його через [rustup](https://rust-lang.org/install):
+Для Python старіше 3.11 також потрібен `python3-tomli` (у Ubuntu 22.04: `sudo apt install python3-tomli`).
+
+Заголовки ALSA, udev, X11, Wayland, libfdt, GTK, SDL, RDMA та Python для цієї збірки не потрібні. Бібліотеки графічного сеансу й аудіо завантажуються під час роботи. Мінімальний контейнер без робочого столу потребує їхніх runtime-пакетів; повний перелік для пакування є в `packaging/Dockerfile`.
+
+Якщо Rust ще не встановлений:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
-Якщо rustup уже є, достатньо оновити stable. Перевірте версії:
-
-```sh
-rustup update stable
-rustc --version
-cargo --version
-python3 --version
-```
-
-Файл `rust-toolchain.toml` вибирає stable автоматично. Пакет Rust зі старого репозиторію дистрибутива може бути надто старим для залежностей проєкту.
-
-### 3. Зібрати й запустити
-
-Відкрийте термінал у корені проєкту — там, де лежать `build.py` і `Cargo.toml`:
+У корені проєкту:
 
 ```sh
 python3 build.py
 ./dist/lilka-emulator/lilka-emulator
 ```
 
-Скрипт завантажує зафіксований архів Espressif QEMU, перевіряє SHA-256, застосовує локальні патчі, збирає Rust-код і компонує його з QEMU. Потім додає ROM, бібліотеку периферії, налаштування шрифтів та ліцензії до `dist/lilka-emulator/`. Встановлювати окремий системний QEMU не потрібно.
+Скрипт перевіряє SHA-256 вихідників, застосовує патчі, збирає лише плату ESP32-S3 та компонує QEMU з Rust-інтерфейсом. Окремий системний QEMU не потрібен. Локальна збірка використовує glibc хоста; для поширення між дистрибутивами використовуйте контейнерний пакет вище.
 
-Для перенесення програми копіюйте **весь каталог** `dist/lilka-emulator/`: поряд із виконуваним файлом потрібні `liblilka_qemu_board_bridge.so`, `rom/` і `fonts.conf`. Системні бібліотеки до пакета не входять; сумісність збірки з іншими дистрибутивами окремо не гарантується. Прошивки та вміст SD користувач додає сам.
-
-Повторна збірка виконується тією ж командою. Вихідники та збірка QEMU кешуються в `.build/`, Rust — у `target/`. Для цих каталогів потрібен додатковий простір на диску. Одна лише команда `cargo build` не створює готовий десктопний пакет.
-
-Якщо під час компіляції бракує оперативної пам'яті, обмежте паралельність обох частин:
+Кеші QEMU зберігаються в `.build/`, Rust — у `target/` або `CARGO_TARGET_DIR`. Зміна патчів автоматично створює новий кеш вихідників. Повторна команда використовує готові об'єкти. `--jobs` обмежує паралельність і Rust, і QEMU; `--no-lto` пришвидшує компонування під час розробки, ціною можливої втрати продуктивності емуляції:
 
 ```sh
-CARGO_BUILD_JOBS=2 python3 build.py --jobs 2
-```
-
-Параметри для власного архіву QEMU, підготовлених вихідників, каталогу збірки або ROM:
-
-```sh
+python3 build.py --jobs 2 --no-lto
 python3 build.py --help
 ```
+
+`--portable` додає бібліотеки до локального пакета; для нього потрібні `patchelf`, `ldconfig`, runtime-бібліотеки з Dockerfile та їхні встановлені ліцензії. Цей параметр сам по собі не знижує вимогу до glibc хоста.
 
 ### Перевірка
 
 ```sh
 LILKA_DATA_DIR=/tmp/lilka-tests cargo test --workspace --lib --locked
+./dist/lilka-emulator/lilka-emulator --cpu-only --version
 ```
 
-Тестові профілі зберігаються окремо від користувацьких. Помилки `pkg-config` означають, що бракує відповідного пакета розробки (`-dev`) або його шляху в `PKG_CONFIG_PATH`. Якщо скрипт повідомляє `QEMU source changed`, приберіть кеш `.build/qemu` і повторіть збірку, щоб заново застосувати поточні патчі.
+Тестові профілі зберігаються окремо від користувацьких. Ліцензії та вимоги до поширення наведено нижче.
 
 ## Робота
 

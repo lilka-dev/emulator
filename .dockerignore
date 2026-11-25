@@ -1,0 +1,7 @@
+.git
+.build
+target
+dist
+measurements
+**/__pycache__
+*.log

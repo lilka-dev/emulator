@@ -1,0 +1,215 @@
+--- a/hw/xtensa/lilka_board_probe.c
++++ b/hw/xtensa/lilka_board_probe.c
+@@ -59,8 +59,8 @@
+     uint32_t (*audio_irq_pending)(const LilkaBridge *);
+     uint64_t (*irq_bits)(LilkaBridge *, uint32_t);
+     void (*finish)(LilkaBridge *);
+-    LilkaWindow windows[8];
+-    LilkaWindow wifi_windows[6];
++    LilkaWindow windows[10];
++    LilkaWindow wifi_windows[4];
+ } bridge;
+ /* C owns these banks; x86 native JIT aligned 32-bit accesses are atomic and
+  * retain TCG memory barriers. All C accesses use qatomic. Commands and non-word
+@@ -519,8 +519,9 @@
+     const char *stop = g_getenv("LILKA_QEMU_STOP_NS");
+     bridge.stop_ns = stop ? g_ascii_strtoull(stop, NULL, 10) : 0;
+     const uint32_t bases[] = {0x60004000, 0x60019000, 0x6000f000,
+-        0x6002d000, 0x6003f000, 0x60024000, 0x60025000, 0x60008800};
+-    uint32_t sizes[] = {0xa00, 0x100, 0x100, 0x100, 0x400, 0x100, 0x100, 0x58};
++        0x6002d000, 0x6003f000, 0x60024000, 0x60025000, 0x60008800,
++        0x6000e000, 0x60006174};
++    uint32_t sizes[] = {0xa00, 0x100, 0x100, 0x100, 0x400, 0x100, 0x100, 0x58, 0x1000, 4};
+     if (g_getenv("LILKA_QEMU_PAGE_SPI")) {
+         /* SPI2/3 each occupy an otherwise unimplemented 4-KiB block. Covering
+          * the complete block avoids QEMU's byte-granular subpage router. The
+@@ -542,8 +543,8 @@
+     }
+     if (g_getenv("LILKA_QEMU_WIFI_SSID")) {
+         const uint32_t wifi_bases[] = {0x60033000, 0x6003500c, 0x60035118,
+-                                      0x60035128, 0x6000e000, 0x60006174};
+-        const uint32_t wifi_sizes[] = {0x2000, 0x14, 8, 4, 0x1000, 4};
++                                      0x60035128};
++        const uint32_t wifi_sizes[] = {0x2000, 0x14, 8, 4};
+         for (size_t i = 0; i < ARRAY_SIZE(wifi_bases); ++i) {
+             LilkaWindow *window = &bridge.wifi_windows[i];
+             window->base = wifi_bases[i];
+--- a/hw/timer/esp_timg.c
++++ b/hw/timer/esp_timg.c
+@@ -427,7 +427,8 @@
+     /* Calculate the new frequency */
+     const uint32_t new_divider = FIELD_EX32(value, TIMG_T0CONFIG, DIVIDER);
+     const uint64_t new_clk = FIELD_EX32(value, TIMG_T0CONFIG, USE_XTAL) ? ESP_XTAL_CLK : ESP_APB_CLK;
+-    const uint64_t new_freq = new_clk / new_divider;
++    const uint32_t divider = new_divider == 0 ? 65536 : MAX(new_divider, 2);
++    const uint64_t new_freq = new_clk / divider;
+     if (new_freq != t0->counter.frequency) {
+         t0->counter.frequency = new_freq;
+     }
+--- a/include/hw/xtensa/esp32s3_intc.h
++++ b/include/hw/xtensa/esp32s3_intc.h
+@@ -142,6 +142,7 @@
+     MemoryRegion iomem;
+     qemu_irq *outputs[ESP32S3_CPU_COUNT];
+     uint8_t irq_map[ESP32S3_CPU_COUNT][ESP32S3_INT_MATRIX_INPUTS];
++    uint32_t input_level[ESP32S3_INT_MATRIX_INPUTS / 32];
+ 
+     /* properties */
+     XtensaCPU *cpu[ESP32S3_CPU_COUNT];
+--- a/hw/xtensa/esp32s3_intc.c
++++ b/hw/xtensa/esp32s3_intc.c
+@@ -26,27 +26,50 @@
+ 
+ #define IRQ_MAP(cpu, input) s->irq_map[cpu][input]
+ 
++static void esp32s3_intmatrix_update(Esp32s3IntMatrixState *s, int cpu, int output)
++{
++    if (!s->outputs[cpu]) {
++        return;
++    }
++    for (int i = 0; i < s->cpu[cpu]->env.config->nextint; ++i) {
++        if (s->cpu[cpu]->env.config->extint[i] != output) {
++            continue;
++        }
++        bool level = false;
++        for (int n = 0; n < ESP32S3_INT_MATRIX_INPUTS; ++n) {
++            if (IRQ_MAP(cpu, n) == output &&
++                (s->input_level[n / 32] & (1u << (n % 32)))) {
++                level = true;
++                break;
++            }
++        }
++        qemu_set_irq(s->outputs[cpu][i], level);
++        break;
++    }
++}
++
+ static void esp32s3_intmatrix_irq_handler(void *opaque, int n, int level)
+ {
+     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(opaque);
+-    for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
+-        if (s->outputs[i] == NULL) {
+-            continue;
+-        }
+-        int out_index = IRQ_MAP(i, n);
+-        for (int int_index = 0; int_index < s->cpu[i]->env.config->nextint; ++int_index) {
+-            if (s->cpu[i]->env.config->extint[int_index] == out_index) {
+-                qemu_set_irq(s->outputs[i][int_index], level);
+-                break;
+-            }
+-        }
++    uint32_t bit = 1u << (n % 32);
++    bool previous = (s->input_level[n / 32] & bit) != 0;
++    if (previous == (level != 0)) {
++        return;
++    }
++    if (level) {
++        s->input_level[n / 32] |= bit;
++    } else {
++        s->input_level[n / 32] &= ~bit;
++    }
++    for (int cpu = 0; cpu < ESP32S3_CPU_COUNT; ++cpu) {
++        esp32s3_intmatrix_update(s, cpu, IRQ_MAP(cpu, n));
+     }
+ }
+ 
+ static inline uint8_t* get_map_entry(Esp32s3IntMatrixState* s, hwaddr addr)
+ {
+     int source_index = addr / sizeof(uint32_t);
+-    if (source_index > ESP32S3_INT_MATRIX_INPUTS * ESP32S3_CPU_COUNT) {
++    if (source_index >= ESP32S3_INT_MATRIX_INPUTS * ESP32S3_CPU_COUNT) {
+ #if INTC_DEBUG
+         info_report("%s: source_index %d out of range", __func__, source_index);
+ #endif // INTC_DEBUG
+@@ -60,6 +83,10 @@
+ static uint64_t esp32s3_intmatrix_read(void* opaque, hwaddr addr, unsigned int size)
+ {
+     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(opaque);
++    hwaddr offset = addr % 0x800;
++    if (offset >= 0x18c && offset < 0x19c) {
++        return s->input_level[(offset - 0x18c) / 4];
++    }
+     uint8_t* map_entry = get_map_entry(s, addr);
+     return (map_entry != NULL) ? *map_entry : 0;
+ }
+@@ -70,9 +97,17 @@
+     info_report("\x1b[31m[INTC] esp32s3_intmatrix_write  addr = %ld, value=%ld\x1b[0m", addr, value);
+ #endif // INTC_DEBUG
+     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(opaque);
++    hwaddr offset = addr % 0x800;
++    if (offset >= 0x18c && offset < 0x19c) {
++        return;
++    }
+     uint8_t* map_entry = get_map_entry(s, addr);
+     if (map_entry != NULL) {
++        int cpu = addr / 0x800;
++        int previous = *map_entry;
+         *map_entry = value & 0x1f;
++        esp32s3_intmatrix_update(s, cpu, previous);
++        esp32s3_intmatrix_update(s, cpu, *map_entry);
+     }
+ }
+ 
+@@ -86,6 +121,7 @@
+ {
+     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(obj);
+     memset(s->irq_map, INTMATRIX_UNINT_VALUE, sizeof(s->irq_map));
++    memset(s->input_level, 0, sizeof(s->input_level));
+     for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
+         if (s->outputs[i] == NULL) {
+             continue;
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -254,11 +254,13 @@
+         xtensa_select_static_vectors(&s->cpu[0].env, s->rtc_cntl.stat_vector_sel[0]);
+         remove_cpu_watchpoints(&s->cpu[0]);
+         cpu_reset(CPU(&s->cpu[0]));
++        s->cpu[0].env.sregs[CPENABLE] = 1;
+     }
+     if (s->requested_reset & ESP32S3_SOC_RESET_APPCPU && (ESP32S3_CPU_COUNT > 1)) {
+         xtensa_select_static_vectors(&s->cpu[1].env, s->rtc_cntl.stat_vector_sel[1]);
+         remove_cpu_watchpoints(&s->cpu[1]);
+         cpu_reset(CPU(&s->cpu[1]));
++        s->cpu[1].env.sregs[CPENABLE] = 1;
+     }
+     s->requested_reset = 0;
+ }
+--- a/hw/xtensa/lilka_board_probe.c
++++ b/hw/xtensa/lilka_board_probe.c
+@@ -59,7 +59,7 @@
+     uint32_t (*audio_irq_pending)(const LilkaBridge *);
+     uint64_t (*irq_bits)(LilkaBridge *, uint32_t);
+     void (*finish)(LilkaBridge *);
+-    LilkaWindow windows[10];
++    LilkaWindow windows[11];
+     LilkaWindow wifi_windows[4];
+ } bridge;
+ /* C owns these banks; x86 native JIT aligned 32-bit accesses are atomic and
+@@ -520,8 +520,8 @@
+     bridge.stop_ns = stop ? g_ascii_strtoull(stop, NULL, 10) : 0;
+     const uint32_t bases[] = {0x60004000, 0x60019000, 0x6000f000,
+         0x6002d000, 0x6003f000, 0x60024000, 0x60025000, 0x60008800,
+-        0x6000e000, 0x60006174};
+-    uint32_t sizes[] = {0xa00, 0x100, 0x100, 0x100, 0x400, 0x100, 0x100, 0x58, 0x1000, 4};
++        0x6000e000, 0x60006174, 0x60031000};
++    uint32_t sizes[] = {0xa00, 0x100, 0x100, 0x100, 0x400, 0x100, 0x100, 0x58, 0x1000, 4, 0x2000};
+     if (g_getenv("LILKA_QEMU_PAGE_SPI")) {
+         /* SPI2/3 each occupy an otherwise unimplemented 4-KiB block. Covering
+          * the complete block avoids QEMU's byte-granular subpage router. The
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -255,12 +255,14 @@
+         remove_cpu_watchpoints(&s->cpu[0]);
+         cpu_reset(CPU(&s->cpu[0]));
+         s->cpu[0].env.sregs[CPENABLE] = 1;
++        s->cpu[0].env.uregs[THREADPTR] = 0;
+     }
+     if (s->requested_reset & ESP32S3_SOC_RESET_APPCPU && (ESP32S3_CPU_COUNT > 1)) {
+         xtensa_select_static_vectors(&s->cpu[1].env, s->rtc_cntl.stat_vector_sel[1]);
+         remove_cpu_watchpoints(&s->cpu[1]);
+         cpu_reset(CPU(&s->cpu[1]));
+         s->cpu[1].env.sregs[CPENABLE] = 1;
++        s->cpu[1].env.uregs[THREADPTR] = 0;
+     }
+     s->requested_reset = 0;
+ }

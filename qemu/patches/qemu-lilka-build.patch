@@ -1,0 +1,18 @@
+--- /dev/null
++++ b/configs/devices/xtensa-softmmu/lilka.mak
+@@ -0,0 +1,3 @@
++CONFIG_XTENSA_ESP32S3=y
++CONFIG_CAN_SJA1000=y
++CONFIG_I2C=y
+--- a/meson.build
++++ b/meson.build
+@@ -4288,6 +4288,9 @@
+     lilka_link_depends = []
+     if get_option('lilka_frontend') != '' and target == 'xtensa-softmmu'
+       lilka_link = [get_option('lilka_frontend'), '-ldl', '-lpthread', '-lm', '-lrt', '-lutil']
++      if cc.get_id() == 'gcc' and get_option('b_lto')
++        lilka_link += ['-flto=' + get_option('b_lto_threads').to_string()]
++      endif
+       lilka_link += ['-Wl,--export-dynamic-symbol=lilka_cpu_run', '-Wl,--export-dynamic-symbol=lilka_cpu_ready', '-Wl,--export-dynamic-symbol=lilka_cpu_shutdown', '-Wl,--export-dynamic-symbol=lilka_cpu_reset']
+       lilka_cflags = ['-DLILKA_EMBEDDED_DESKTOP']
+       lilka_link_depends = [get_option('lilka_frontend')]

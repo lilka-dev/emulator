@@ -23,7 +23,10 @@ def run(args, cwd=ROOT):
 
 def sha(path):
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+        return digest.hexdigest()
 
 
 def download(url, destination, expected):
@@ -45,9 +48,15 @@ def main():
     parser.add_argument('--qemu-build', type=Path)
     parser.add_argument('--rom', type=Path)
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 1, 6))
+    parser.add_argument('--no-lto', action='store_true', help='Faster linking for local development')
+    parser.add_argument('--portable', action='store_true', help='Bundle shared libraries (requires patchelf)')
     args = parser.parse_args()
     if sys.platform != 'linux' or platform.machine() != 'x86_64':
         parser.error('This integrated build currently supports Linux x86-64')
+    if args.jobs < 1:
+        parser.error('--jobs must be positive')
+    if args.portable and not shutil.which('patchelf'):
+        parser.error('--portable requires patchelf')
     cache = ROOT / '.build'
     cache.mkdir(exist_ok=True)
     manifest = json.loads((ROOT / 'qemu/source-manifest.json').read_text())
@@ -57,23 +66,33 @@ def main():
         archive = args.archive or download(
             'https://github.com/espressif/qemu/archive/refs/tags/' + manifest['tag'] + '.tar.gz',
             cache / 'qemu-source.tar.gz', manifest['source_archive_sha256'])
-        source = cache / 'qemu' / ('qemu-' + manifest['tag'])
+        prepared = cache / ('qemu-' + sha(ROOT / 'qemu/source-manifest.json')[:12])
+        source = prepared / ('qemu-' + manifest['tag'])
         if not source.exists():
-            run([sys.executable, ROOT / 'qemu/prepare.py', archive.resolve(), cache / 'qemu'])
+            run([sys.executable, ROOT / 'qemu/prepare.py', archive.resolve(), prepared])
     for item in manifest['source_files']:
         if sha(source / item['file']) != item['sha256']:
-            raise RuntimeError('QEMU source changed: ' + item['file'] + '; prepare a fresh .build/qemu tree')
-    run(['cargo', 'build', '--release', '--locked', '--workspace'])
-    library = ROOT / 'target/release/liblilka_emulator.a'
+            raise RuntimeError('QEMU source changed: ' + item['file'] + '; prepare a fresh QEMU source tree')
+    run(['cargo', 'build', '--release', '--locked', '--workspace', '--jobs', args.jobs])
+    target = Path(json.loads(subprocess.check_output(
+        ['cargo', 'metadata', '--no-deps', '--format-version=1'], cwd=ROOT))['target_directory'])
+    library = target / 'release/liblilka_emulator.a'
     build = args.qemu_build.resolve() if args.qemu_build else source / 'build'
-    if not (build / 'build.ninja').exists():
-        build.mkdir(exist_ok=True)
-        run([source / 'configure', '--target-list=xtensa-softmmu', '--enable-gcrypt',
-             '--disable-docs', '--disable-gtk', '--disable-sdl', '--disable-vnc',
-             '--disable-slirp', '--disable-tools', '--disable-user', '--disable-werror'], build)
-    meson = build / 'pyvenv/bin/meson'
-    run([meson, 'configure', build, '-Doptimization=3', '-Db_lto=true',
-         '-Dx86_version=1', '-Dlilka_frontend=' + str(library)])
+    configuration = [str(source / 'configure'), '--target-list=xtensa-softmmu',
+                     '--without-default-features', '--without-default-devices',
+                     '--with-devices-xtensa=lilka', '--enable-gcrypt', '--enable-pixman',
+                     '--disable-fdt', '--disable-docs', '--disable-tools',
+                     '--disable-user', '--disable-werror']
+    options = ['-Doptimization=3', '-Ddebug=false',
+               '-Db_lto=' + str(not args.no_lto).lower(),
+               '-Db_lto_threads=' + str(min(args.jobs, 2)),
+               '-Dx86_version=1', '-Dlilka_frontend=' + str(library)]
+    stamp = build / 'lilka-build.json'
+    settings = configuration + options
+    if not (build / 'build.ninja').exists() or not stamp.exists() or json.loads(stamp.read_text()) != settings:
+        build.mkdir(parents=True, exist_ok=True)
+        run(configuration + options, build)
+        stamp.write_text(json.dumps(settings))
     run(['ninja', '-C', build, '-j', args.jobs, 'qemu-system-xtensa'])
     destination = ROOT / 'dist/lilka-emulator'
     destination.mkdir(parents=True, exist_ok=True)
@@ -82,12 +101,13 @@ def main():
     run(['strip', '--strip-debug', executable])
     executable.replace(destination / 'lilka-emulator')
     bridge = destination / '.liblilka_qemu_board_bridge.so.new'
-    shutil.copy2(ROOT / 'target/release/liblilka_qemu_board_bridge.so', bridge)
+    shutil.copy2(target / 'release/liblilka_qemu_board_bridge.so', bridge)
     bridge.replace(destination / 'liblilka_qemu_board_bridge.so')
     (destination / 'rom').mkdir(exist_ok=True)
     rom = destination / 'rom/esp32s3_rev0_rom.bin'
     if args.rom:
-        shutil.copy2(args.rom, rom)
+        if args.rom.resolve() != rom.resolve():
+            shutil.copy2(args.rom, rom)
     elif not rom.exists():
         release = download(RELEASE, cache / 'espressif-qemu.tar.xz', RELEASE_SHA)
         with tarfile.open(release) as archive:
@@ -108,6 +128,11 @@ def main():
             for license in sorted(directory.iterdir()):
                 if license.is_file() and license.name.upper().startswith(('LICENSE', 'COPYING', 'NOTICE')):
                     output.write('\n' + license.name + '\n' + license.read_text(errors='replace') + '\n')
+    if args.portable:
+        run([sys.executable, ROOT / 'packaging/bundle.py', destination])
+    else:
+        shutil.rmtree(destination / 'lib', ignore_errors=True)
+        (destination / 'runtime.json').unlink(missing_ok=True)
     print('Built:', destination / 'lilka-emulator')
 
 

@@ -8,7 +8,6 @@ pub struct Radio {
     ssid: String,
     mac: mac::WifiMac,
     ap: ap::OpenAp,
-    calibration: RegisterBank,
     rx: std::collections::VecDeque<Vec<u8>>,
     network: crate::net::NetworkWorker,
     pub transmitted: u64,
@@ -49,7 +48,6 @@ impl Radio {
             ssid: ssid.into(),
             mac: mac::WifiMac::new(240_000_000),
             ap: ap::OpenAp::new(ssid)?,
-            calibration: RegisterBank::new(),
             rx: Default::default(),
             network: crate::net::NetworkWorker::new(),
             transmitted: 0,
@@ -77,11 +75,10 @@ impl Radio {
     }
     pub fn handles(address: u32) -> bool {
         matches!(address, 0x6003_3000..=0x6003_4fff | 0x6003_500c..=0x6003_501f |
-            0x6003_5118..=0x6003_511f | 0x6003_5128..=0x6003_512b | 0x6000_e000..=0x6000_efff | 0x6000_6174..=0x6000_6177)
+            0x6003_5118..=0x6003_511f | 0x6003_5128..=0x6003_512b)
     }
     pub fn reset(&mut self) {
         self.mac = mac::WifiMac::new(240_000_000);
-        self.calibration = RegisterBank::new();
         self.ap = ap::OpenAp::new(&self.ssid).unwrap();
         self.rx.clear();
         self.network = crate::net::NetworkWorker::new();
@@ -90,27 +87,19 @@ impl Radio {
     }
     pub fn read(&mut self, address: u32, now: u64) -> u32 {
         self.mac.now_cycles = now;
-        let value = match address {
-            0x6000_6174 => self.calibration.read(address) | (1 << 16),
-            0x6000_e040..=0x6000_e05c => (self.calibration.read(address) & 0x3fff_ffff) | (7 << 24),
-            0x6000_e000..=0x6000_efff => self.calibration.read(address) & !(1 << 25),
-            _ => self
-                .mac
-                .read((address - 0x6000_0000) >> 12, address & 0xfff),
-        };
+        let value = self
+            .mac
+            .read((address - 0x6000_0000) >> 12, address & 0xfff);
         self.last_read = (address, value);
         value
     }
     pub fn write(&mut self, address: u32, value: u32, now: u64) {
         self.mac.now_cycles = now;
         self.last_write = (address, value);
-        match address {
-            0x6000_6174 | 0x6000_e000..=0x6000_efff => self.calibration.write(address, value),
-            _ => self
-                .mac
-                .write((address - 0x6000_0000) >> 12, address & 0xfff, value),
-        }
+        self.mac
+            .write((address - 0x6000_0000) >> 12, address & 0xfff, value);
     }
+
     fn armed(
         &self,
         bus: &mut impl Bus,

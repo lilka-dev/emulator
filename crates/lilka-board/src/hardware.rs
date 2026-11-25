@@ -170,6 +170,12 @@ impl Hardware {
         (DMA..DMA + 0x400).contains(&a)
     }
     pub fn read(&self, a: u32) -> u32 {
+        match a {
+            0x6000_6174 => return self.reg(a) | (1 << 16),
+            0x6000_e040..=0x6000_e05c => return (self.reg(a) & 0x3fff_ffff) | (7 << 24),
+            0x6000_e000..=0x6000_efff => return self.reg(a) & !(1 << 25),
+            _ => {}
+        }
         if !Self::handles(a) {
             return self.reg(a);
         }
@@ -486,6 +492,19 @@ mod tests {
         b.write(a, flags).unwrap();
         b.write(a + 4, buffer).unwrap();
         b.write(a + 8, next).unwrap();
+    }
+    #[test]
+    fn analog_calibration_is_ready_without_a_radio() {
+        let mut hardware = Hardware::default();
+        let mut memory = Memory::default();
+        let control = 0x6000_e040;
+        assert_ne!(hardware.read(control) & (1 << 24), 0);
+        hardware.write(&mut memory, control, 8).unwrap();
+        assert_eq!(hardware.read(control) & 0xff, 8);
+        assert_ne!(hardware.read(control) & (1 << 24), 0);
+        hardware.write(&mut memory, 0x6000_e000, 1 << 25).unwrap();
+        assert_eq!(hardware.read(0x6000_e000) & (1 << 25), 0);
+        assert_ne!(hardware.read(0x6000_6174) & (1 << 16), 0);
     }
     #[test]
     fn system_dma_reset_clears_inflight_work_but_keeps_i2s_and_capture() {

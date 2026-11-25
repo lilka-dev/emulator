@@ -62,6 +62,14 @@
     {
       "file": "patches/qemu-embedded-desktop.patch",
       "sha256": "f3ed2f9f090243e31f0338da170804da338b2ea4b44651ae84c07cd2fa6a653f"
+    },
+    {
+      "file": "patches/qemu-hal-startup.patch",
+      "sha256": "690ba766d998aa107931b7522bfddc6f635905df4ff8c1c68060f9314a9c166c"
+    },
+    {
+      "file": "patches/qemu-lilka-build.patch",
+      "sha256": "9681b818615ec8ac7e467fc1f8750747ebefffb914bd1ed03ac367629d144506"
     }
   ],
   "source_files": [
@@ -87,7 +95,7 @@
     },
     {
       "file": "hw/xtensa/esp32s3.c",
-      "sha256": "e8eba81b58a8c31f482c86cce615558f7af54605919c07bdd8d97a83f9566cae"
+      "sha256": "079aa92180939d36bc2fbb1429930f6926783d2f6aa8f3a7311478aa63617642"
     },
     {
       "file": "hw/xtensa/esp32s3_clk.c",
@@ -95,7 +103,7 @@
     },
     {
       "file": "hw/xtensa/lilka_board_probe.c",
-      "sha256": "b9982ba2eeb16ff24cb0fadf72d780a095bb4c505f63b2d34d36d3b7698d7822"
+      "sha256": "278f1293b93a1a21806e1bb167d45c8aaf8cc48da2dc8c812d00905aa08cff60"
     },
     {
       "file": "hw/xtensa/meson.build",
@@ -115,7 +123,7 @@
     },
     {
       "file": "meson.build",
-      "sha256": "d586beef10595c23c86476d3a433600778631ee9480343930394a9eb1a5b3278"
+      "sha256": "c992e7978c8a76489bac604f190afc422f7a26647333657d58b2cd09907cc86d"
     },
     {
       "file": "system/physmem.c",
@@ -160,6 +168,22 @@
     {
       "file": "meson_options.txt",
       "sha256": "799585acb6b811840ca641cf341869be9506c37a59043b5eb2c3fee63b0918c8"
+    },
+    {
+      "file": "hw/timer/esp_timg.c",
+      "sha256": "d5f5cc5cfcba584ada0b0437dffe3a0ca01a5d8e46b05b5ec267556975ac04ef"
+    },
+    {
+      "file": "include/hw/xtensa/esp32s3_intc.h",
+      "sha256": "2724d6b52de62e34c041aad4eef6fb92404c5f447f7eda2751a09984ce335e3c"
+    },
+    {
+      "file": "hw/xtensa/esp32s3_intc.c",
+      "sha256": "932ee409f40e18ba344d0566bea8886c97c014e845345cbfac776b7bc4f5b4a2"
+    },
+    {
+      "file": "configs/devices/xtensa-softmmu/lilka.mak",
+      "sha256": "8c29c2b019361138b6e739064ee7fff38d7fd5d2233932401925cec25db1cb91"
     }
   ],
   "binary_sha256": "b4e32b6f1ce8b09bad3f847b0dbceab4c7a49baa6bc5c0e1cb184b0fb7d8e560",
