@@ -36,6 +36,11 @@ let live;
 let pendingApp = null;
 let running = false;
 const log = [];
+const timers = [];
+function remember(line) {
+  log.push(line);
+  if (log.length > 500) log.splice(0, log.length - 500);
+}
 
 function setStatus(text) {
   ui.status.textContent = text;
@@ -106,9 +111,9 @@ async function boot() {
     return;
   }
   emulator = await createLilkaEmulator({
-    print: (line) => log.push(line),
+    print: remember,
     printErr: (line) => {
-      log.push(line);
+      remember(line);
       if (!line.includes('unsupported syscall')) console.warn('[lilka]', line);
     },
   });
@@ -189,10 +194,9 @@ async function start() {
   ui.canvas.focus();
   for (const button of [ui.pause, ui.reset, ui.stop]) button.disabled = false;
   requestAnimationFrame(draw);
-  setInterval(report, 1000);
-  setInterval(readUart, 1000);
+  timers.push(setInterval(report, 1000), setInterval(readUart, 1000));
   // Flash writes are file writes; keep IndexedDB close behind them.
-  setInterval(() => sync(false).catch(console.warn), 15000);
+  timers.push(setInterval(() => sync(false).catch(console.warn), 15000));
 }
 
 let shownFrame = 0;
@@ -218,6 +222,9 @@ function report() {
   const status = live.status;
   if (status === STATUS_FAILED || status === STATUS_FINISHED) {
     running = false;
+    timers.forEach(clearInterval);
+    readUart();
+    sync(false).catch(console.warn);
     const reason = log.filter((line) => line.startsWith('Lilka:') || line.includes('rror')).slice(-3).join('\n');
     showOverlay(status === STATUS_FAILED ? 'Не вдалося запустити:\n' + reason : 'Зупинено');
     setStatus(status === STATUS_FAILED ? 'Помилка' : 'Зупинено');
