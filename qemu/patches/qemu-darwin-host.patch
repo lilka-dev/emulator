@@ -1,0 +1,21 @@
+--- a/meson.build
++++ b/meson.build
+@@ -4287,11 +4287,18 @@
+     lilka_cflags = []
+     lilka_link_depends = []
+     if get_option('lilka_frontend') != '' and target == 'xtensa-softmmu'
++      if host_os == 'darwin'
++        lilka_link = [get_option('lilka_frontend'), '-Wl,-export_dynamic', '-lobjc', '-liconv', '-lm']
++        foreach framework : ['AppKit', 'ApplicationServices', 'Carbon', 'CoreFoundation', 'CoreGraphics', 'CoreVideo', 'Foundation', 'QuartzCore']
++          lilka_link += ['-framework', framework]
++        endforeach
++      else
+       lilka_link = [get_option('lilka_frontend'), '-ldl', '-lpthread', '-lm', '-lrt', '-lutil']
+       if cc.get_id() == 'gcc' and get_option('b_lto')
+         lilka_link += ['-flto=' + get_option('b_lto_threads').to_string()]
+       endif
+       lilka_link += ['-Wl,--export-dynamic-symbol=lilka_cpu_run', '-Wl,--export-dynamic-symbol=lilka_cpu_ready', '-Wl,--export-dynamic-symbol=lilka_cpu_shutdown', '-Wl,--export-dynamic-symbol=lilka_cpu_reset']
++      endif
+       lilka_cflags = ['-DLILKA_EMBEDDED_DESKTOP']
+       lilka_link_depends = [get_option('lilka_frontend')]
+     endif

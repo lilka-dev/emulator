@@ -415,6 +415,8 @@ mod tests {
             let start = Clock::now();
             loop {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    // BSD/macOS sockets inherit O_NONBLOCK from the listener; Linux ones do not.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(3)))
                         .unwrap();

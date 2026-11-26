@@ -89,6 +89,19 @@ LILKA_DATA_DIR=/tmp/lilka-tests cargo test --workspace --lib --locked
 
 Тестові профілі зберігаються окремо від користувацьких. Ліцензії та вимоги до поширення наведено нижче.
 
+## Збірка — macOS (Apple Silicon)
+
+Потрібні Xcode Command Line Tools, Homebrew, Rust stable через rustup і Python 3.11+ з Homebrew: системний Python 3.9 не має `tarfile.data_filter`.
+
+```sh
+xcode-select --install
+brew install python@3.11 pkgconf ninja glib pixman libgcrypt
+python3.11 build.py
+./dist/lilka-emulator/lilka-emulator
+```
+
+Збирається той самий QEMU, плюс патч `qemu/patches/qemu-darwin-host.patch`: фронтенд компонується з фреймворками AppKit, Foundation, CoreGraphics та іншими замість Linux-бібліотек, а символи `lilka_cpu_*` залишаються експортованими через `-export_dynamic`. Після `strip` бінарник підписується ad-hoc, бо Apple Silicon не запускає непідписаний код. Міст `liblilka_qemu_board_bridge.so` на macOS — це dylib під тим самим ім'ям. Дані профілів зберігаються в `~/Library/Application Support/lilka-emulator`. `--portable` доступний лише на Linux.
+
 ## Робота
 
 Створіть профіль, оберіть `.bin` і теку для емуляції SD(рекомендується обирати одразу як теку в профілі). Дані створюються та зберігаються в стандартному користувацькому каталозі `lilka-emulator`; `LILKA_DATA_DIR` перевизначає його. Зазвичай створює в `.local/share/lilka-emulator`  Файл `portable.txt` поряд із програмою вмикає локальну теку `data`.
@@ -105,7 +118,7 @@ LILKA_DATA_DIR=/tmp/lilka-tests cargo test --workspace --lib --locked
  - Не вся внутрішня емуляція точна
  - Bluetooth(можливо його і не буде взагалі)
  - Керування через gamepad, або через Lilka
- - Підтримка інших платформ, Windows та MacOS
+ - Підтримка Windows; готовий пакет для macOS (поки лише локальна збірка на Apple Silicon)
 ### Що точно не буде
  - Емуляція фізичних провідних інтерфейсів по типу I2C, SPI і т.д. (т.ч. GPIO)
  - Емуляція інших інтерфейсів які з великою вірогідністю не будуть працювати, по типу USB чи Bluetooth

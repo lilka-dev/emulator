@@ -51,8 +51,11 @@ def main():
     parser.add_argument('--no-lto', action='store_true', help='Faster linking for local development')
     parser.add_argument('--portable', action='store_true', help='Bundle shared libraries (requires patchelf)')
     args = parser.parse_args()
-    if sys.platform != 'linux' or platform.machine() != 'x86_64':
-        parser.error('This integrated build currently supports Linux x86-64')
+    darwin = sys.platform == 'darwin' and platform.machine() == 'arm64'
+    if not darwin and (sys.platform != 'linux' or platform.machine() != 'x86_64'):
+        parser.error('This integrated build currently supports Linux x86-64 and macOS arm64')
+    if darwin and args.portable:
+        parser.error('--portable is only available on Linux')
     if args.jobs < 1:
         parser.error('--jobs must be positive')
     if args.portable and not shutil.which('patchelf'):
@@ -83,10 +86,14 @@ def main():
                      '--with-devices-xtensa=lilka', '--enable-gcrypt', '--enable-pixman',
                      '--disable-fdt', '--disable-docs', '--disable-tools',
                      '--disable-user', '--disable-werror']
+    if darwin:
+        configuration.append('--python=' + sys.executable)
     options = ['-Doptimization=3', '-Ddebug=false',
                '-Db_lto=' + str(not args.no_lto).lower(),
                '-Db_lto_threads=' + str(min(args.jobs, 2)),
-               '-Dx86_version=1', '-Dlilka_frontend=' + str(library)]
+               '-Dlilka_frontend=' + str(library)]
+    if not darwin:
+        options.insert(-1, '-Dx86_version=1')
     stamp = build / 'lilka-build.json'
     settings = configuration + options
     if not (build / 'build.ninja').exists() or not stamp.exists() or json.loads(stamp.read_text()) != settings:
@@ -98,10 +105,13 @@ def main():
     destination.mkdir(parents=True, exist_ok=True)
     executable = destination / '.lilka-emulator.new'
     shutil.copy2(build / 'qemu-system-xtensa', executable)
-    run(['strip', '--strip-debug', executable])
+    run(['strip', '-S' if darwin else '--strip-debug', executable])
+    if darwin:
+        run(['codesign', '--force', '--sign', '-', executable])
     executable.replace(destination / 'lilka-emulator')
     bridge = destination / '.liblilka_qemu_board_bridge.so.new'
-    shutil.copy2(target / 'release/liblilka_qemu_board_bridge.so', bridge)
+    # The frontend loads the bridge by this fixed name; dlopen accepts a Mach-O dylib under it.
+    shutil.copy2(target / ('release/liblilka_qemu_board_bridge.' + ('dylib' if darwin else 'so')), bridge)
     bridge.replace(destination / 'liblilka_qemu_board_bridge.so')
     (destination / 'rom').mkdir(exist_ok=True)
     rom = destination / 'rom/esp32s3_rev0_rom.bin'
@@ -120,7 +130,7 @@ def main():
     shutil.copy2(ROOT / 'packaging/fonts.conf', destination)
     shutil.copy2(ROOT / 'LICENSE', destination)
     shutil.copy2(ROOT / 'README.md', destination)
-    metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version=1', '--filter-platform=x86_64-unknown-linux-gnu'], cwd=ROOT))
+    metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version=1', '--filter-platform=' + ('aarch64-apple-darwin' if darwin else 'x86_64-unknown-linux-gnu')], cwd=ROOT))
     with (destination / 'LICENSES/Rust-dependencies.txt').open('w') as output:
         for package in sorted(metadata['packages'], key=lambda p: (p['name'], p['version'])):
             output.write('\n' + package['name'] + ' ' + package['version'] + '\n' + str(package['license']) + '\n')

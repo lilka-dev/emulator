@@ -70,6 +70,10 @@
     {
       "file": "patches/qemu-lilka-build.patch",
       "sha256": "9681b818615ec8ac7e467fc1f8750747ebefffb914bd1ed03ac367629d144506"
+    },
+    {
+      "file": "patches/qemu-darwin-host.patch",
+      "sha256": "1aae2bf41ac567f306de8dab10c46405060b22f51fd96ecb87619e058145b0c2"
     }
   ],
   "source_files": [
@@ -123,7 +127,7 @@
     },
     {
       "file": "meson.build",
-      "sha256": "c992e7978c8a76489bac604f190afc422f7a26647333657d58b2cd09907cc86d"
+      "sha256": "673828aecf2b23059dc23ccbf5f602f3f252ef50a4943e8478ad678b3c242dac"
     },
     {
       "file": "system/physmem.c",
