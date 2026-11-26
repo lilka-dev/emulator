@@ -2,6 +2,7 @@
 //
 //   node web/test/boot.mjs FIRMWARE.bin [WALL_SECONDS] [--threads single|multi]
 //                          [--frame out.ppm] [--app APP.bin] [--sd FOLDER]
+//                          [--audio out.pcm]   (s16le 48 kHz stereo, as drained)
 //
 // Uses dist/web (python3 web/build.py), or LILKA_WEB_DIST. Exit status 0 means
 // the display showed something other than black before the time ran out.
@@ -22,6 +23,7 @@ const threads = option('--threads', 'multi');
 const frameOut = option('--frame');
 const app = option('--app');
 const sdFolder = option('--sd');
+const audioOut = option('--audio');
 const [firmware, seconds = '60'] = args;
 if (!firmware) {
   console.error('usage: node web/test/boot.mjs FIRMWARE.bin [WALL_SECONDS] [--threads single|multi]');
@@ -61,6 +63,21 @@ const read64 = (offset) => Number(Atomics.load(words, offset / 8));
 const started = performance.now();
 module.callMain(argv);
 
+// Drain the PCM ring like the page does, every 10 ms.
+const audio = [];
+const ring = new Uint32Array(memory, base + layout.audio, layout.audio_capacity);
+const drain = () => {
+  const head = Atomics.load(words, layout.audio_head / 8);
+  const tail = Atomics.load(words, layout.audio_tail / 8);
+  const count = Number(head - tail);
+  if (!count) return;
+  const chunk = new Uint32Array(count);
+  for (let i = 0; i < count; i++) chunk[i] = ring[Number((tail + BigInt(i)) % BigInt(layout.audio_capacity))];
+  audio.push(chunk);
+  Atomics.store(words, layout.audio_tail / 8, head);
+};
+const drainer = audioOut ? setInterval(drain, 10) : null;
+
 let lit = false;
 let last = { wall: started, guest: 0 };
 const deadline = started + Number(seconds) * 1000;
@@ -79,6 +96,12 @@ while (performance.now() < deadline) {
   if (status >= 3) break;
 }
 
+if (audioOut) {
+  clearInterval(drainer);
+  drain();
+  fs.writeFileSync(audioOut, Buffer.concat(audio.map((chunk) => Buffer.from(chunk.buffer))));
+  console.log('audio:', audioOut, audio.reduce((sum, chunk) => sum + chunk.length, 0), 'frames');
+}
 if (frameOut) {
   const { width, height } = layout;
   const rgba = new Uint8Array(memory, base + layout.pixels, width * height * 4);
