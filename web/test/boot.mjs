@@ -78,6 +78,17 @@ const drain = () => {
 };
 const drainer = audioOut ? setInterval(drain, 10) : null;
 
+// When the screen first shows something other than black.
+let firstPicture = null;
+const watcher = setInterval(() => {
+  const pixels = new Uint32Array(memory, base + layout.pixels, layout.width * layout.height);
+  if (pixels.some((pixel) => (pixel & 0xffffff) !== 0)) {
+    firstPicture = { wall: (performance.now() - started) / 1000, guest: read64(layout.time) / 240e6 };
+    console.log(`first picture: wall ${firstPicture.wall.toFixed(1)}s guest ${firstPicture.guest.toFixed(2)}s`);
+    clearInterval(watcher);
+  }
+}, 100);
+
 let lit = false;
 let last = { wall: started, guest: 0 };
 const deadline = started + Number(seconds) * 1000;

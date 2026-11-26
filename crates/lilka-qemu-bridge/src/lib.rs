@@ -247,6 +247,8 @@ impl Bridge {
                 "dma_descriptors": s.hardware.dma_descriptors, "pcm_frames": self.pcm_frames,
                 "dma_trace": s.hardware.dma_trace,
                 "audio_completion_overflows": s.hardware.audio_completion_overflows,
+                "audio_refill_waits": s.hardware.audio_refill_waits,
+                "audio_refill_skips": s.hardware.audio_refill_skips,
                 "errors": s.errors, "display_diagnostics": s.devices.display.diagnostics(),
                 "pending_inputs": self.inputs.len(),
                 "system_resets": self.system_resets,
@@ -280,6 +282,8 @@ pub extern "C" fn lilka_board_create(opaque: *mut c_void, read: Read, write: Wri
     let mut board = BoardDevice::default();
     board.state.hardware.audio_completion_queue =
         std::env::var_os("LILKA_QEMU_AUDIO_COMPLETIONS").is_some();
+    board.state.hardware.audio_wait_refill =
+        std::env::var_os("LILKA_QEMU_AUDIO_REFILL_WAIT").is_some();
     if std::env::var_os("LILKA_QEMU_TRACE_DMA").is_some() {
         board.state.hardware.dma_trace = Some(Vec::with_capacity(65536));
     }

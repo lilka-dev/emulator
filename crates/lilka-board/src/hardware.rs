@@ -132,6 +132,16 @@ pub struct Hardware {
     pub audio_completion_queue: bool,
     pub audio_completion_overflows: u64,
     audio_completions: [VecDeque<u32>; 5],
+    /// Play only I2S audio the firmware wrote, never stale ring buffers; see
+    /// `Hardware::audio_paused`. Off by default; the browser build enables it.
+    pub audio_wait_refill: bool,
+    pub audio_refill_waits: u64,
+    pub audio_refill_skips: u64,
+    audio_played: std::collections::HashMap<u32, u64>,
+    audio_rings: [Vec<(u32, usize)>; 2],
+    audio_looping: [bool; 2],
+    audio_waiting: [Option<audio::RefillWait>; 2],
+    audio_scratch: Vec<u8>,
 }
 impl Hardware {
     pub fn reset_peripherals(&mut self, mask0: u32, mask1: u32) {
@@ -149,12 +159,17 @@ impl Hardware {
             for pending in &mut self.audio_completions {
                 pending.clear();
             }
+            self.audio_played.clear();
+            self.audio_waiting = [None; 2];
+            self.audio_rings = Default::default();
+            self.audio_looping = [false; 2];
         }
         for (i, bit) in [4, 21].into_iter().enumerate() {
             if mask0 & (1 << bit) != 0 {
                 self.regs.banks[1 + i].fill(0);
                 self.audio_phase[i] = Default::default();
                 self.held[i] = [0; 2];
+                self.audio_waiting[i] = None;
             }
         }
         if mask0 & (1 << 11) != 0 {

@@ -235,7 +235,8 @@ def build_rust(env, jobs):
     # Linking into QEMU's shared (threaded) memory needs std rebuilt with atomics;
     # RUSTC_BOOTSTRAP enables -Zbuild-std on the pinned stable toolchain.
     env['RUSTC_BOOTSTRAP'] = '1'
-    env['RUSTFLAGS'] = '-C target-feature=+atomics,+bulk-memory,+mutable-globals -C panic=abort'
+    env['RUSTFLAGS'] = ('-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128'
+                        ' -C panic=abort')
     run(['cargo', 'build', '--release', '--locked', '--jobs', jobs, '-p', 'lilka-emulator',
          '--target', 'wasm32-unknown-emscripten', '--no-default-features', '--features', 'web',
          '-Zbuild-std=std,panic_abort'], ROOT, env)
@@ -244,7 +245,7 @@ def build_rust(env, jobs):
     return target / 'wasm32-unknown-emscripten/release/liblilka_emulator.a'
 
 
-def build_qemu(source, library, env, jobs, build):
+def build_qemu(source, library, env, jobs, build, lto):
     configuration = ['emconfigure', source / 'configure', '--static',
                      '--target-list=xtensa-softmmu', '--without-default-features',
                      '--without-default-devices', '--with-devices-xtensa=lilka',
@@ -252,9 +253,12 @@ def build_qemu(source, library, env, jobs, build):
                      '--disable-fdt', '--disable-docs', '--disable-tools', '--disable-user',
                      '--disable-werror', '--python=' + sys.executable,
                      # meson's find_library (gpg-error) does not ask pkg-config.
-                     '--extra-cflags=-I' + str(SYSROOT / 'include'),
+                     # SIMD128 is WebAssembly's vector extension (the AVX/NEON
+                     # counterpart), in every current browser.
+                     '--extra-cflags=-msimd128 -I' + str(SYSROOT / 'include'),
                      '--extra-ldflags=-L' + str(SYSROOT / 'lib')]
-    options = ['-Doptimization=3', '-Ddebug=false', '-Dlilka_frontend=' + str(library)]
+    options = ['-Doptimization=3', '-Ddebug=false', '-Db_lto=' + str(lto).lower(),
+               '-Dlilka_frontend=' + str(library)]
     settings = [str(a) for a in configuration + options]
     stamp = build / 'lilka-build.json'
     if not (build / 'build.ninja').exists() or not stamp.exists() or json.loads(stamp.read_text()) != settings:
@@ -301,6 +305,7 @@ def main():
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument('--qemu-tree', type=Path, help='Already prepared QEMU source tree')
     parser.add_argument('--deps-only', action='store_true')
+    parser.add_argument('--no-lto', action='store_true', help='Faster linking for local development')
     args = parser.parse_args()
     if sys.version_info < (3, 10):
         parser.error('Emscripten needs Python 3.10+; run this script with it')
@@ -310,7 +315,7 @@ def main():
         return
     source = prepare_qemu(args.qemu_tree)
     library = build_rust(env, args.jobs)
-    build = build_qemu(source, library, env, args.jobs, source / 'build')
+    build = build_qemu(source, library, env, args.jobs, source / 'build', not args.no_lto)
     print('Built:', package(build))
 
 

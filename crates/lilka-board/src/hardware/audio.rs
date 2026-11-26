@@ -28,6 +28,36 @@ impl Phase {
         count
     }
 }
+/// A channel whose ring holds no audio the firmware has written since it last played.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct RefillWait {
+    /// I2S samples the channel has been paused for.
+    samples: u32,
+}
+/// I2S samples between two rechecks of a paused ring.
+const REFILL_RECHECK: u32 = 32;
+/// How long a ring may stay unchanged before it counts as audio the firmware
+/// means to repeat: 1 s at 44.1 kHz. It then plays as is, without pausing again,
+/// until the firmware writes new audio.
+const REFILL_PATIENCE: u32 = 44100;
+/// What to do with the next I2S buffer under `Hardware::audio_wait_refill`.
+enum Refill {
+    Play,
+    Skip,
+    Wait,
+}
+
+/// FNV-1a of the buffer and whether it is all zeros.
+fn content(scratch: &mut Vec<u8>, b: &mut impl Bus, buffer: u32, length: usize) -> Option<(u64, bool)> {
+    scratch.resize(length, 0);
+    b.read_into(buffer, scratch).ok()?;
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in scratch.iter() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    Some((hash, scratch.iter().all(|&byte| byte == 0)))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Format {
     numerator: u64,
@@ -63,6 +93,70 @@ impl Hardware {
             }
             self.audio_desc[i] = Some((ch, a, flags, buffer, next));
         }
+    }
+    /// Whether I2S channel `i` is paused, waiting for the firmware to write audio.
+    ///
+    /// The DMA loops over a ring of buffers that the firmware rewrites. A CPU
+    /// slower than the hardware (the browser's interpreter) falls behind, and
+    /// the DMA replays stale buffers as a stretched buzz. With
+    /// `audio_wait_refill` only audio the firmware wrote plays: a non-silent
+    /// buffer about to replay exactly what it played last time is skipped (its
+    /// EOF fires at once and returns it to the driver) while another buffer of
+    /// the ring holds new audio. When none does, the channel pauses and emits no
+    /// frames until one does, or until `REFILL_PATIENCE` samples have passed.
+    /// Guest time keeps running: the stream carries the firmware's audio in
+    /// order, only slower than real time when the CPU is.
+    pub(super) fn audio_paused(&self, i: usize) -> bool {
+        self.audio_waiting[i].is_some()
+    }
+    /// Whether a buffer of channel `i`'s ring differs from what it last played.
+    fn audio_ring_has_news(&mut self, b: &mut impl Bus, i: usize) -> bool {
+        for &(buffer, length) in &self.audio_rings[i] {
+            if let Some((hash, silent)) = content(&mut self.audio_scratch, b, buffer, length)
+                && !silent
+                && self.audio_played.get(&buffer) != Some(&hash)
+            {
+                return true;
+            }
+        }
+        false
+    }
+    fn audio_refill(&mut self, b: &mut impl Bus, i: usize, buffer: u32, length: usize) -> Refill {
+        if let Some(wait) = &mut self.audio_waiting[i] {
+            wait.samples += 1;
+            let samples = wait.samples;
+            if samples % REFILL_RECHECK != 0 {
+                return Refill::Wait;
+            }
+            if samples >= REFILL_PATIENCE {
+                self.audio_looping[i] = true;
+            } else if !self.audio_ring_has_news(b, i) {
+                return Refill::Wait;
+            }
+            self.audio_waiting[i] = None;
+        }
+        if !self.audio_rings[i].iter().any(|&(known, _)| known == buffer) && self.audio_rings[i].len() < 32 {
+            self.audio_rings[i].push((buffer, length));
+        }
+        let Some((hash, silent)) = content(&mut self.audio_scratch, b, buffer, length) else {
+            return Refill::Play;
+        };
+        if silent || self.audio_played.get(&buffer) != Some(&hash) {
+            // New audio: the firmware is writing again.
+            self.audio_looping[i] &= silent;
+            self.audio_played.insert(buffer, hash);
+            return Refill::Play;
+        }
+        if self.audio_looping[i] {
+            return Refill::Play;
+        }
+        if self.audio_ring_has_news(b, i) {
+            self.audio_refill_skips += 1;
+            return Refill::Skip;
+        }
+        self.audio_waiting[i] = Some(RefillWait::default());
+        self.audio_refill_waits += 1;
+        Refill::Wait
     }
     pub fn audio_irq_pending(&self) -> bool {
         (0..2).any(|i| {
@@ -161,6 +255,7 @@ impl Hardware {
         }
         for _ in 0..frames {
             let mut mix = [0i32; 2];
+            let mut paused = 0;
             if hz > 0.0 && duty > 0.0 && duty < 1.0 {
                 self.buzzer_phase = (self.buzzer_phase + hz / AUDIO_RATE as f64).fract();
                 let value = if self.buzzer_phase < duty {
@@ -177,10 +272,20 @@ impl Hardware {
                     for _ in 0..count {
                         self.held[i] = self.pcm(b, i, format.bits, format.channels)?;
                     }
+                    if self.audio_paused(i) {
+                        paused += 1;
+                        continue;
+                    }
                     for (m, s) in mix.iter_mut().zip(self.held[i]) {
                         *m += s as i32;
                     }
                 }
+            }
+            let active = formats.iter().flatten().count();
+            if paused > 0 && paused == active && !(hz > 0.0 && duty > 0.0 && duty < 1.0) {
+                // Every source waits for the firmware: no frame rather than a
+                // stale or invented one (audio_paused).
+                continue;
             }
             if self.samples.len() == AUDIO_RATE as usize * 2 {
                 self.samples.pop_front();
@@ -299,6 +404,18 @@ impl Hardware {
         let width = if bits <= 16 { 2 } else { 4 };
         let stride = width * channels;
         let offset = self.audio_offset[i];
+        if offset == 0 && self.audio_wait_refill && length > 0 && length <= (f & 4095) as usize {
+            match self.audio_refill(b, i, buffer, length) {
+                Refill::Play => {}
+                // Paused: tick_frames emits nothing for this channel.
+                Refill::Wait => return Ok(self.held[i]),
+                Refill::Skip => {
+                    self.audio_desc[i] = None;
+                    self.done(b, ch, 1, (a, f, next), length, f & (1 << 30) != 0)?;
+                    return Ok(self.held[i]);
+                }
+            }
+        }
         if offset == 0 {
             self.audio_hash[i] = 0;
         }
@@ -476,5 +593,96 @@ mod tests {
             let (hz, _) = buzzer(3, timer).buzzer();
             assert!((hz - note).abs() < 0.1, "expected {note}, got {hz}");
         }
+    }
+}
+
+#[cfg(test)]
+mod refill_tests {
+    use super::*;
+    #[derive(Default)]
+    struct Ram(std::collections::BTreeMap<u32, u32>);
+    impl Bus for Ram {
+        fn read(&mut self, a: u32) -> Result<u32> {
+            Ok(self.0.get(&a).copied().unwrap_or(0))
+        }
+        fn write(&mut self, a: u32, v: u32) -> Result<()> {
+            self.0.insert(a, v);
+            Ok(())
+        }
+        fn irq(&mut self, _: u32, _: bool) -> Result<()> {
+            Ok(())
+        }
+    }
+    const A: u32 = 0x3fc9_0000;
+    const B: u32 = 0x3fc9_0200;
+    fn fill(ram: &mut Ram, buffer: u32, value: u32) {
+        for word in 0..128 {
+            ram.write(buffer + word * 4, value).unwrap();
+        }
+    }
+    fn refill(h: &mut Hardware, ram: &mut Ram, buffer: u32) -> &'static str {
+        match h.audio_refill(ram, 0, buffer, 512) {
+            Refill::Play => "play",
+            Refill::Skip => "skip",
+            Refill::Wait => "wait",
+        }
+    }
+    /// The DMA reaches the next buffer of a two-buffer ring; `samples` more I2S
+    /// samples pass while it waits.
+    fn wait(h: &mut Hardware, ram: &mut Ram, buffer: u32, samples: u32) -> &'static str {
+        let mut result = refill(h, ram, buffer);
+        for _ in 1..samples {
+            result = refill(h, ram, buffer);
+        }
+        result
+    }
+
+    #[test]
+    fn only_audio_the_firmware_wrote_plays() {
+        let mut h = Hardware::default();
+        let mut ram = Ram::default();
+        fill(&mut ram, A, 0x1111_1111);
+        fill(&mut ram, B, 0x2222_2222);
+        assert_eq!(refill(&mut h, &mut ram, A), "play");
+        assert_eq!(refill(&mut h, &mut ram, B), "play");
+        // The firmware rewrote A only: A plays, then B would replay stale audio.
+        fill(&mut ram, A, 0x3333_3333);
+        assert_eq!(refill(&mut h, &mut ram, A), "play");
+        assert_eq!(refill(&mut h, &mut ram, B), "wait");
+        assert!(h.audio_paused(0));
+        assert_eq!(wait(&mut h, &mut ram, B, REFILL_RECHECK), "wait");
+        // The driver hands the firmware A again (the last buffer done); once it
+        // holds new audio, stale B is skipped so that A plays next.
+        fill(&mut ram, A, 0x4444_4444);
+        assert_eq!(wait(&mut h, &mut ram, B, REFILL_RECHECK), "skip");
+        assert!(!h.audio_paused(0));
+        assert_eq!(refill(&mut h, &mut ram, A), "play");
+        assert_eq!((h.audio_refill_waits, h.audio_refill_skips), (1, 1));
+    }
+
+    #[test]
+    fn silence_plays_and_an_unchanged_ring_loops_after_patience() {
+        let mut h = Hardware::default();
+        let mut ram = Ram::default();
+        for _ in 0..3 {
+            assert_eq!(refill(&mut h, &mut ram, A), "play");
+        }
+        fill(&mut ram, A, 0x1111_1111);
+        fill(&mut ram, B, 0x2222_2222);
+        assert_eq!(refill(&mut h, &mut ram, A), "play");
+        assert_eq!(refill(&mut h, &mut ram, B), "play");
+        assert_eq!(refill(&mut h, &mut ram, A), "wait");
+        // A ring the firmware never rewrites is audio it means to repeat: it
+        // plays at the first recheck after REFILL_PATIENCE samples.
+        let waited = (1..).find(|_| refill(&mut h, &mut ram, A) == "play").unwrap();
+        assert!((REFILL_PATIENCE..REFILL_PATIENCE + REFILL_RECHECK).contains(&waited));
+        for _ in 0..4 {
+            assert_eq!(refill(&mut h, &mut ram, B), "play");
+            assert_eq!(refill(&mut h, &mut ram, A), "play");
+        }
+        // New audio ends the loop: stale buffers wait again.
+        fill(&mut ram, B, 0x5555_5555);
+        assert_eq!(refill(&mut h, &mut ram, B), "play");
+        assert_eq!(refill(&mut h, &mut ram, A), "wait");
     }
 }
