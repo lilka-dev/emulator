@@ -79,7 +79,7 @@ pub fn demo_image() -> Vec<u8> {
     image
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
 pub mod folder;
 
 enum WriteState {
@@ -89,13 +89,13 @@ enum WriteState {
 
 pub struct SdCard {
     pub image: Vec<u8>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     file: Option<std::fs::File>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     folder: Option<std::sync::Mutex<folder::FolderCard>>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     file_writable: bool,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     read_cache: Option<(usize, Vec<u8>)>,
     size: usize,
     pub io_error: Option<String>,
@@ -130,13 +130,13 @@ impl SdCard {
         Ok(Self {
             size: image.len(),
             image,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
             file: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
             folder: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
             file_writable: false,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
             read_cache: None,
             io_error: None,
             selected: false,
@@ -158,7 +158,7 @@ impl SdCard {
             file_cached_sector_reads: 0,
         })
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     pub fn from_folder(path: &std::path::Path) -> anyhow::Result<Self> {
         let folder = folder::FolderCard::open(path)?;
         let mut card = Self::from_image(vec![0; 512 * 1024])?;
@@ -168,16 +168,16 @@ impl SdCard {
         Ok(card)
     }
     pub fn is_folder_backed(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         {
             self.folder.is_some()
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
         {
             false
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     pub fn from_file(path: &std::path::Path, writable: bool) -> anyhow::Result<Self> {
         let limit = if std::env::var_os("LILKA_SD_STREAM_ONLY").is_some() {
             0
@@ -186,7 +186,7 @@ impl SdCard {
         };
         Self::from_file_with_cache_limit(path, writable, limit)
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     fn from_file_with_cache_limit(
         path: &std::path::Path,
         writable: bool,
@@ -226,21 +226,21 @@ impl SdCard {
         self.size
     }
     pub fn is_file_backed(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         {
             self.file.is_some()
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
         {
             false
         }
     }
     pub fn flush(&self) -> anyhow::Result<()> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         if let Some(folder) = &self.folder {
             folder.lock().unwrap().flush()?;
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         if let Some(file) = &self.file
             && self.file_writable
         {
@@ -263,7 +263,7 @@ impl SdCard {
         self.multi_write = false;
         self.read_next = None;
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     pub fn export(&self, path: &std::path::Path) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.is_folder_backed(),
@@ -315,7 +315,7 @@ impl SdCard {
         if offset.checked_add(512)? > self.size {
             return None;
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         if let Some(folder) = &mut self.folder {
             return match folder.get_mut().unwrap().read_sector(sector as u32) {
                 Ok(bytes) => Some(bytes),
@@ -328,13 +328,13 @@ impl SdCard {
         let mut bytes = [0; 512];
         if self.image.len() == self.size {
             bytes.copy_from_slice(&self.image[offset..offset + 512]);
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
             if self.file.is_some() {
                 self.file_cached_sector_reads += 1;
             }
             return Some(bytes);
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         if let Some(file) = &mut self.file {
             use std::io::{Read, Seek, SeekFrom};
             if let Some((first, cache)) = &self.read_cache
@@ -376,11 +376,11 @@ impl SdCard {
         {
             return false;
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         {
             self.read_cache = None;
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         if let Some(folder) = &mut self.folder {
             return match folder
                 .get_mut()
@@ -394,7 +394,7 @@ impl SdCard {
                 }
             };
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         if let Some(file) = &mut self.file {
             use std::io::{Seek, SeekFrom, Write};
             let result = file
@@ -416,7 +416,7 @@ impl SdCard {
         if self.is_folder_backed() {
             return false;
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         if self.file.is_some() {
             for sector in start..=end {
                 if !self.write_sector(sector, &[0xff; 512]) {
@@ -684,7 +684,7 @@ impl SdCard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     #[test]
     fn small_file_cache_keeps_writes_erase_and_reopen_coherent() -> anyhow::Result<()> {
         use std::io::{Read, Seek, SeekFrom};
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(readonly.read_sector(900), Some([0xff; 512]));
         Ok(())
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     #[test]
     fn sparse_four_gib_file_reads_writes_last_sector_without_ram_image() -> anyhow::Result<()> {
         use std::io::{Read, Seek, SeekFrom};

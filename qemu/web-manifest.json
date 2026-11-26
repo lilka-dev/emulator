@@ -1,0 +1,131 @@
+{
+  "description": "Browser (WebAssembly) build: applied on top of source-manifest.json's patched tree. qemu-emscripten-host.patch backports QEMU 10.1's Emscripten/TCI support (Kohei Tokunaga) to 9.2 with fixes for this tree; qemu-lilka-web.patch links the board bridge statically and starts the session from src/web.rs.",
+  "patches": [
+    {
+      "file": "patches/web/qemu-emscripten-host.patch",
+      "sha256": "2869d39883d05140ed721fe7dcb49ac82bc7fd7fd5830cd12ed41a064f701027"
+    },
+    {
+      "file": "patches/web/qemu-lilka-web.patch",
+      "sha256": "9126e21ca640f5b37997198375c3b0513f25a07700eb7c820609cbc6ed902fcb"
+    }
+  ],
+  "source_files": [
+    {
+      "file": "backends/meson.build",
+      "sha256": "22154b09fdad91dfd7e63f7bad020a4c4511ce9efc9ac2082ece6334325016c3"
+    },
+    {
+      "file": "block/file-posix.c",
+      "sha256": "429f8f08d39e9492f9349676d756d352d5cdad5d161c520b8270e273abfed70f"
+    },
+    {
+      "file": "configs/meson/emscripten.txt",
+      "sha256": "e54af9811aae8dfb57f7a7ce07fdb3fcdef78e8730ff7390f460b1dc97872b39"
+    },
+    {
+      "file": "configure",
+      "sha256": "b26bbc10d6e9f96a01ded774f49ee832ac0a81f74c25984ccc4eb4232de95959"
+    },
+    {
+      "file": "hw/core/loader.c",
+      "sha256": "f123d76834a425e31016167ef2d05178f9ba8299553bf5437e75caf0814103ba"
+    },
+    {
+      "file": "hw/misc/esp_sha.c",
+      "sha256": "7a2a9c1c942253c1737666934242c6aad3e66ce476180aa67961566ede624ac9"
+    },
+    {
+      "file": "hw/net/can/xlnx-versal-canfd.c",
+      "sha256": "b96bf95c2db04051f72ebba828e2c2fe58f7948eb67a5da0e588875ec167b8fe"
+    },
+    {
+      "file": "hw/xtensa/lilka_board_probe.c",
+      "sha256": "71438721a4ed8f6d5ea0d3b4edeba3567597b78537cfa9ae60170f5b23535e5a"
+    },
+    {
+      "file": "include/glib-compat.h",
+      "sha256": "0a775da604b4d4317db9571f38b14e572a1b914037e635bfc8a63ca0169542d7"
+    },
+    {
+      "file": "include/qemu/atomic.h",
+      "sha256": "9e988e52ff993336b6644782ddf53baf33fa1c4b42cde215ad51d876e413073f"
+    },
+    {
+      "file": "include/qemu/cacheflush.h",
+      "sha256": "78bf15e51b871d17d056817f6e9169a6bad581594b72664b7482573c4971df2f"
+    },
+    {
+      "file": "include/qemu/osdep.h",
+      "sha256": "e6265143a02342e3bc3c401692fd244b99b5dac8a35be5e98cfc14d032c795a9"
+    },
+    {
+      "file": "include/sysemu/os-wasm.h",
+      "sha256": "d76f0a6e8fc5199742fbe31a8dd386363ad0f2a89b2c7977a61ce1954be39a41"
+    },
+    {
+      "file": "meson.build",
+      "sha256": "6890b1495ea4773a2bc4152004e1f11de9ef2b94eb8b16de048827cb78728268"
+    },
+    {
+      "file": "meson_options.txt",
+      "sha256": "190f69e0eead5f1fded8812d9744c58a182fab5dbbeac1b3f0b173a92f00ac0a"
+    },
+    {
+      "file": "os-wasm.c",
+      "sha256": "ef2b5ec22f2a0ccf98256cb1688e97ddcdaf671be74d96d732e376f0ce94c909"
+    },
+    {
+      "file": "qemu-options.hx",
+      "sha256": "7f9cdd9dcf4e2cccef8da21f365da7de5a5ad8e35234a056d4ebd672b76110e5"
+    },
+    {
+      "file": "qom/object.c",
+      "sha256": "c6d542bbc99d0b16b822de69d78300d019ba317a56585c389e4edecae3f728f2"
+    },
+    {
+      "file": "scripts/meson-buildoptions.sh",
+      "sha256": "96fcc4c7802da597f29545c2d84aecf5cd6f0d6f16fa366c49ca2a9ed7209018"
+    },
+    {
+      "file": "system/main.c",
+      "sha256": "6af88d6460edeee601684165904c45264caa2b5f6db966efc3c8857b6157fc17"
+    },
+    {
+      "file": "system/memory.c",
+      "sha256": "087fbb673577fe142236bfad975107ea9c232db6b8a00b601c6c1ba4a9992457"
+    },
+    {
+      "file": "system/physmem.c",
+      "sha256": "c741d15590b3ee80780b60ba06b6ad61c893ec2a43a939b797ec099e78e297bd"
+    },
+    {
+      "file": "system/vl.c",
+      "sha256": "8d7bc6e51f603314b9b6ae1905645e4a3e8df9798586c8134d0c8647d6efcdb5"
+    },
+    {
+      "file": "tcg/tci-wasm-call.c.inc",
+      "sha256": "02a202f50e7b3155fdd2e0560abdad3ce80e0351625732d957b5735e333c6078"
+    },
+    {
+      "file": "tcg/tci.c",
+      "sha256": "69ec4c40712ba4fde8f003003511e6a0394d9a0e26ed5a64e9473b9976c19cfc"
+    },
+    {
+      "file": "util/cacheflush.c",
+      "sha256": "12052356596b65234da3f4f659320906fe69be0f86e9f55ea6b83b55f1ac0a8d"
+    },
+    {
+      "file": "util/coroutine-wasm.c",
+      "sha256": "b1fb5058ad88ebe61f9fc2c54ef5dd772e7c38219e5b648575eca6e6495d9a50"
+    },
+    {
+      "file": "util/meson.build",
+      "sha256": "e96841b868eccd075d748d6b9660cac5bf4922468a6dbd1f8076bbac9680d768"
+    },
+    {
+      "file": "util/oslib-posix.c",
+      "sha256": "ea3349518d22f34f226e3e33e3128935d4fd2ccc68eae6e080eb08fd17bdfe70"
+    }
+  ]
+}

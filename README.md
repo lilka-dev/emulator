@@ -102,6 +102,37 @@ python3.11 build.py
 
 Збирається той самий QEMU, плюс патч `qemu/patches/qemu-darwin-host.patch`: фронтенд компонується з фреймворками AppKit, Foundation, CoreGraphics та іншими замість Linux-бібліотек, а символи `lilka_cpu_*` залишаються експортованими через `-export_dynamic`. Після `strip` бінарник підписується ad-hoc, бо Apple Silicon не запускає непідписаний код. Міст `liblilka_qemu_board_bridge.so` на macOS — це dylib під тим самим ім'ям. Дані профілів зберігаються в `~/Library/Application Support/lilka-emulator`. `--portable` доступний лише на Linux.
 
+## Збірка — браузер (WebAssembly)
+
+Той самий QEMU з платою Lilka збирається Emscripten у WebAssembly й працює на сторінці без встановлення. Потрібні [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (`emcc` у `PATH` або змінна `EMSDK`; без них скрипт шукає `.build/emsdk`), Rust stable з ціллю й вихідниками std, Python 3.10+, Ninja, `patch`, `pkg-config`, autotools-збірка (`make`) та Node (входить до emsdk).
+
+```sh
+git clone https://github.com/emscripten-core/emsdk.git .build/emsdk
+EMSDK_PYTHON=python3.11 .build/emsdk/emsdk install latest
+EMSDK_PYTHON=python3.11 .build/emsdk/emsdk activate latest
+rustup target add wasm32-unknown-emscripten
+rustup component add rust-src
+python3.11 web/build.py
+python3.11 web/serve.py   # http://localhost:8080
+```
+
+Перша збірка кросс-компілює zlib, libffi, pixman, GLib, libgpg-error і libgcrypt у `.build/web/sysroot` (перевірені SHA-256, потрібен інтернет), далі готує вихідники QEMU так само, як нативна збірка, і додає патчі з `qemu/web-manifest.json`:
+
+- `qemu/patches/web/qemu-emscripten-host.patch` — підтримка Emscripten із QEMU 10.1 (автор Kohei Tokunaga), перенесена на 9.2: TCI-інтерпретатор замість JIT, coroutine через fiber-и Emscripten, виправлення типів вказівників на функції (WebAssembly перевіряє сигнатуру кожного непрямого виклику) та прямі виклики TCG-хелперів замість libffi.
+- `qemu/patches/web/qemu-lilka-web.patch` — міст плати компонується статично (без `dlopen`), а `main` передає керування `src/web.rs`.
+
+Rust-частина збирається як одна статична бібліотека: `cargo build -p lilka-emulator --target wasm32-unknown-emscripten --no-default-features --features web` з `-Zbuild-std` (std перезбирається з атомарними операціями для спільної пам'яті потоків). Результат — `dist/web`: `qemu-system-xtensa.js/.wasm`, сторінка, ROM та ліцензії.
+
+Сторінка потребує `SharedArrayBuffer`, тому сервер має надсилати заголовки `Cross-Origin-Opener-Policy: same-origin` і `Cross-Origin-Embedder-Policy: require-corp` (`web/serve.py` так робить). Для хостингу без власних заголовків (наприклад, GitHub Pages) їх додає `coi-serviceworker.js`; потрібен HTTPS або localhost.
+
+У браузері прошивка, стан флеш-пам'яті та файли SD зберігаються в IndexedDB цього сайту. Зміни, які програма записала на SD, потрапляють у сховище під час «Зупинити й зберегти»; там же можна завантажити SD як ZIP. Wi-Fi вимкнений: браузер не дає програмі сирих TCP/UDP-сокетів.
+
+Процесор інтерпретується (TCI), тож емуляція повільніша за нативну: KeiraOS доходить до головного меню приблизно за 14 с (нативно — близько 4 с) з двома потоками, по одному на ядро ESP32-S3. Перевірка без браузера:
+
+```sh
+node web/test/boot.mjs firmware/KeiraOS_merged_LANG_UK.bin 40 --frame /tmp/keira.ppm
+```
+
 ## Робота
 
 Створіть профіль, оберіть `.bin` і теку для емуляції SD(рекомендується обирати одразу як теку в профілі). Дані створюються та зберігаються в стандартному користувацькому каталозі `lilka-emulator`; `LILKA_DATA_DIR` перевизначає його. Зазвичай створює в `.local/share/lilka-emulator`  Файл `portable.txt` поряд із програмою вмикає локальну теку `data`.
@@ -113,6 +144,7 @@ python3.11 build.py
  - Працювати з потенційно всіма .bin софтом.
  - Емуляція екрану, кнопок керування, аудіо I2S та буззера.
  - **ЕКСПЕРИМЕНТАЛЬНА** підтримка Wi-Fi, може використовуватись наприклад для встановлення додатків з каталога.
+ - Працювати в браузері (WebAssembly): повільніше за нативну збірку й без Wi-Fi.
 ### Чого немає але планується(типу Roadmap)
  - UART емуляція для логів, і для Lua Live(частково все це є, треба тільки пронести в інтерфейс)
  - Не вся внутрішня емуляція точна

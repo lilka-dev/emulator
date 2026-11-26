@@ -1,10 +1,14 @@
 use anyhow::{Result, ensure};
-use memmap2::{MmapMut, MmapOptions};
+#[cfg(not(target_arch = "wasm32"))]
+use memmap2::{MmapMut as Mapping, MmapOptions};
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs::OpenOptions;
 use std::{
-    fs::OpenOptions,
     path::Path,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
+#[cfg(target_arch = "wasm32")]
+use shared::Mapping;
 
 pub const WIDTH: usize = super::devices::display::WIDTH;
 pub const HEIGHT: usize = super::devices::display::HEIGHT;
@@ -13,7 +17,7 @@ pub const INPUT_MASK: u64 = (1u64 << 49) - 1;
 const MAGIC: u32 = 0x4c49_4c32;
 const HEADER: usize = 128;
 const AUDIO: usize = HEADER + WIDTH * HEIGHT * 4;
-const SIZE: usize = AUDIO + AUDIO_CAPACITY * 4;
+pub const SIZE: usize = AUDIO + AUDIO_CAPACITY * 4;
 const HEAD: usize = 8;
 const TAIL: usize = 16;
 const DROPPED: usize = 24;
@@ -30,9 +34,29 @@ const STATUS: usize = 100;
 const PLAYED: usize = 104;
 const UNDERRUNS: usize = 112;
 const PLAYBACK_DROPPED: usize = 120;
+/// Byte offsets of the protocol words, for a reader in another language.
+pub const LAYOUT: &[(&str, usize)] = &[
+    ("size", SIZE),
+    ("width", WIDTH),
+    ("height", HEIGHT),
+    ("pixels", HEADER),
+    ("audio", AUDIO),
+    ("audio_capacity", AUDIO_CAPACITY),
+    ("audio_head", HEAD),
+    ("audio_tail", TAIL),
+    ("frame", FRAME),
+    ("input", INPUT),
+    ("input_pins", 49),
+    ("time", TIME),
+    ("run", RUN),
+    ("status", STATUS),
+    ("played", PLAYED),
+    ("underruns", UNDERRUNS),
+    ("playback_dropped", PLAYBACK_DROPPED),
+];
 
 pub struct Ipc {
-    map: MmapMut,
+    map: Mapping,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Stats {
@@ -49,6 +73,7 @@ pub struct Stats {
     pub playback_dropped_frames: u64,
 }
 impl Ipc {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn create(path: &Path) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
@@ -61,23 +86,55 @@ impl Ipc {
         let this = Self {
             map: unsafe { MmapOptions::new().len(SIZE).map_mut(&file)? },
         };
-        this.u32(4).store(1, Ordering::Relaxed);
-        this.u64(INPUT).store(INPUT_MASK, Ordering::Relaxed);
-        this.u32(RUN).store(1, Ordering::Relaxed);
-        this.u32(0).store(MAGIC, Ordering::Release);
+        this.initialize();
         Ok(this)
     }
-    pub fn open(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-        let meta = file.metadata()?;
-        ensure!(
-            meta.is_file() && meta.len() == SIZE as u64,
-            "Invalid live mapping size"
-        );
-        // SAFETY: The owning launcher retains the fixed-size file until the
-        // child exits. Every shared location is accessed atomically below.
+    /// The browser has no files to map: the page and the CPU threads share wasm
+    /// memory, so one buffer per process stands in for the mapping and `path`
+    /// only names it.
+    #[cfg(target_arch = "wasm32")]
+    pub fn create(_path: &Path) -> Result<Self> {
         let this = Self {
-            map: unsafe { MmapOptions::new().len(SIZE).map_mut(&file)? },
+            map: Mapping::get(),
+        };
+        for offset in (0..SIZE).step_by(4) {
+            this.u32(offset).store(0, Ordering::Relaxed);
+        }
+        this.initialize();
+        Ok(this)
+    }
+    /// Address of the shared protocol buffer, for a page reading it in place.
+    #[cfg(target_arch = "wasm32")]
+    pub fn base() -> *const u8 {
+        Mapping::get().as_ptr()
+    }
+    fn initialize(&self) {
+        self.u32(4).store(1, Ordering::Relaxed);
+        self.u64(INPUT).store(INPUT_MASK, Ordering::Relaxed);
+        self.u32(RUN).store(1, Ordering::Relaxed);
+        self.u32(0).store(MAGIC, Ordering::Release);
+    }
+    pub fn open(path: &Path) -> Result<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let this = {
+            let file = OpenOptions::new().read(true).write(true).open(path)?;
+            let meta = file.metadata()?;
+            ensure!(
+                meta.is_file() && meta.len() == SIZE as u64,
+                "Invalid live mapping size"
+            );
+            // SAFETY: The owning launcher retains the fixed-size file until the
+            // child exits. Every shared location is accessed atomically below.
+            Self {
+                map: unsafe { MmapOptions::new().len(SIZE).map_mut(&file)? },
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let this = {
+            let _ = path;
+            Self {
+                map: Mapping::get(),
+            }
         };
         ensure!(
             this.u32(0).load(Ordering::Acquire) == MAGIC
@@ -232,6 +289,30 @@ impl Ipc {
             played_frames: self.u64(PLAYED).load(Ordering::Acquire),
             audio_underruns: self.u64(UNDERRUNS).load(Ordering::Acquire),
             playback_dropped_frames: self.u64(PLAYBACK_DROPPED).load(Ordering::Acquire),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod shared {
+    use std::sync::OnceLock;
+    /// One zeroed, 8-byte aligned buffer of `SIZE` bytes that lives for the process.
+    #[derive(Clone, Copy)]
+    pub struct Mapping(*mut u8);
+    // SAFETY: The buffer is never freed and is only accessed through atomics.
+    unsafe impl Send for Mapping {}
+    unsafe impl Sync for Mapping {}
+    impl Mapping {
+        pub fn get() -> Self {
+            static BUFFER: OnceLock<usize> = OnceLock::new();
+            let address = *BUFFER.get_or_init(|| {
+                let words = vec![0u64; super::SIZE.div_ceil(8)].leak();
+                words.as_mut_ptr() as usize
+            });
+            Self(address as *mut u8)
+        }
+        pub fn as_ptr(&self) -> *const u8 {
+            self.0
         }
     }
 }

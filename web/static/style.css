@@ -1,0 +1,94 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f4f4f2;
+  --fg: #1d1d1b;
+  --muted: #6b6b66;
+  --panel: #ffffff;
+  --line: #d9d9d4;
+  --body: #2a2a2a;
+  --key: #3b3b3b;
+  --key-fg: #f2f2f2;
+  --accent: #e8622c;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --fg: #ececea;
+    --muted: #9a9a94;
+    --panel: #1f1f1e;
+    --line: #34342f;
+    --body: #303030;
+    --key: #4a4a4a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 20px; border-bottom: 1px solid var(--line);
+}
+header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.status { margin-left: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+main {
+  display: flex; flex-wrap: wrap; gap: 24px; justify-content: center;
+  padding: 24px 16px;
+}
+.device {
+  display: grid; align-items: center; gap: 16px 20px;
+  grid-template-columns: auto auto auto;
+  grid-template-areas: "dpad screen actions" ". system .";
+  background: var(--body); padding: 24px; border-radius: 28px;
+  touch-action: none; user-select: none; -webkit-user-select: none;
+}
+.screen { grid-area: screen; position: relative; line-height: 0; }
+canvas {
+  width: 560px; max-width: 100%; aspect-ratio: 280 / 240; background: #000;
+  image-rendering: pixelated; border-radius: 6px; outline: none;
+}
+canvas:focus-visible { box-shadow: 0 0 0 3px var(--accent); }
+.overlay {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 24px; text-align: center; line-height: 1.4;
+  color: #d8d8d8; background: rgb(0 0 0 / 70%); border-radius: 6px; font-size: 15px;
+}
+.overlay[hidden] { display: none; }
+.device button {
+  background: var(--key); color: var(--key-fg); border: 0; font-weight: 600;
+  border-radius: 50%; width: 52px; height: 52px; font-size: 16px; cursor: pointer;
+}
+.device button.held { background: var(--accent); }
+.dpad { grid-area: dpad; display: grid; grid-template: repeat(3, 52px) / repeat(3, 52px); gap: 4px; }
+.dpad [data-button="up"] { grid-area: 1 / 2; }
+.dpad [data-button="left"] { grid-area: 2 / 1; }
+.dpad [data-button="right"] { grid-area: 2 / 3; }
+.dpad [data-button="down"] { grid-area: 3 / 2; }
+.dpad button { border-radius: 10px; }
+.actions { grid-area: actions; display: grid; grid-template: repeat(2, 52px) / repeat(2, 52px); gap: 10px; }
+.system { grid-area: system; display: flex; gap: 16px; justify-content: center; }
+.system button { width: auto; height: 32px; padding: 0 16px; border-radius: 16px; font-size: 13px; }
+.panel {
+  flex: 0 1 420px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px;
+}
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+.panel button, select {
+  font: inherit; font-size: 14px; padding: 7px 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer;
+}
+.panel button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.panel button:disabled { opacity: 0.45; cursor: default; }
+fieldset { border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 10px; }
+fieldset:disabled { opacity: 0.55; }
+legend { font-weight: 600; padding: 0 4px; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.hint { color: var(--muted); font-size: 13px; margin: 0; line-height: 1.45; }
+details summary { cursor: pointer; font-size: 14px; }
+pre {
+  max-height: 260px; overflow: auto; font-size: 11px; line-height: 1.35;
+  background: var(--bg); padding: 8px; border-radius: 8px; white-space: pre-wrap;
+}
+@media (max-width: 760px) {
+  .device { grid-template-columns: auto auto; grid-template-areas: "screen screen" "dpad actions" "system system"; padding: 16px; }
+  canvas { width: 100%; }
+}

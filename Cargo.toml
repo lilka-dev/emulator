@@ -14,16 +14,24 @@ members = ["crates/lilka-board", "crates/lilka-qemu-bridge"]
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+default = ["desktop"]
+# The native iced desktop that embeds QEMU and dlopens the board bridge.
+desktop = ["dep:libloading", "dep:iced", "dep:rfd", "dep:maudio"]
+# The browser build: QEMU, this crate and the board bridge in one wasm module.
+web = ["dep:lilka-qemu-board-bridge"]
+
 [dependencies]
 lilka-board = { path = "crates/lilka-board" }
 anyhow = "1"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-libloading = "0.8"
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "image-without-codecs", "tokio", "fira-sans", "x11", "wayland"] }
-rfd = "0.17"
-maudio = "0.1.15"
+libloading = { version = "0.8", optional = true }
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "image-without-codecs", "tokio", "fira-sans", "x11", "wayland"], optional = true }
+rfd = { version = "0.17", optional = true }
+maudio = { version = "0.1.15", optional = true }
+lilka-qemu-board-bridge = { path = "crates/lilka-qemu-bridge", default-features = false, optional = true }
 
 [profile.release]
 opt-level = 3
