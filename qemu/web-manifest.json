@@ -7,7 +7,7 @@
     },
     {
       "file": "patches/web/qemu-lilka-web.patch",
-      "sha256": "9126e21ca640f5b37997198375c3b0513f25a07700eb7c820609cbc6ed902fcb"
+      "sha256": "3208de31f5804445d559ef618bce643806f9686417b34884ef46379a880e9e2e"
     }
   ],
   "source_files": [
@@ -48,12 +48,28 @@
       "sha256": "b96bf95c2db04051f72ebba828e2c2fe58f7948eb67a5da0e588875ec167b8fe"
     },
     {
+      "file": "hw/xtensa/esp32s3.c",
+      "sha256": "4586b68457b4ca132306ae68f4365ec47b583060503e13c348fbe6f720cd586c"
+    },
+    {
+      "file": "hw/xtensa/esp32s3_clk.c",
+      "sha256": "dd4c4a402b50c3abab593e10b252c2dec9980c0cb51ee27c789382a985a0aef7"
+    },
+    {
       "file": "hw/xtensa/lilka_board_probe.c",
       "sha256": "71438721a4ed8f6d5ea0d3b4edeba3567597b78537cfa9ae60170f5b23535e5a"
     },
     {
+      "file": "hw/xtensa/pic_cpu.c",
+      "sha256": "8fe7e7a3807eaabbbf9c9e23ae98cc2a696ce0a08bd39422f09f4ff83bdcd9d0"
+    },
+    {
       "file": "include/glib-compat.h",
       "sha256": "0a775da604b4d4317db9571f38b14e572a1b914037e635bfc8a63ca0169542d7"
+    },
+    {
+      "file": "include/hw/xtensa/esp32s3_clk.h",
+      "sha256": "ca3e6ea5bf20dbdc083006c0f55b3b9040c4a11c51805be51056e22c78fa65dd"
     },
     {
       "file": "include/qemu/atomic.h",
@@ -110,6 +126,10 @@
     {
       "file": "system/vl.c",
       "sha256": "8d7bc6e51f603314b9b6ae1905645e4a3e8df9798586c8134d0c8647d6efcdb5"
+    },
+    {
+      "file": "target/xtensa/exc_helper.c",
+      "sha256": "15e53d046f034ba3029391e111815b4a9d368aab7b420f0931cc898ca99159c1"
     },
     {
       "file": "tcg/tci-wasm-call.c.inc",

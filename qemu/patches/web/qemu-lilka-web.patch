@@ -1,3 +1,95 @@
+diff --git a/hw/xtensa/esp32s3.c b/hw/xtensa/esp32s3.c
+index 9962493..eac1847 100644
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -272,6 +272,24 @@ static void esp32s3_apply_cpu_stall(CPUState *cpu, run_on_cpu_data data)
+     xtensa_runstall(cpu_env(cpu), data.host_int != 0);
+ }
+ 
++/* Runs on the APP CPU between TBs, so it needs no CPU_INTERRUPT_HALT (one
++ * still pending after the release would halt the core again).
++ */
++static void esp32s3_apply_app_cpu_wait(CPUState *cpu, run_on_cpu_data data)
++{
++    bool wait = data.host_int != 0;
++    cpu_env(cpu)->runstall = wait;
++    cpu->halted = wait;
++}
++
++/* Queued in FIFO order, so a release always follows the stall before it. */
++static void esp32s3_app_cpu_wait(void *opaque, bool wait)
++{
++    Esp32s3SocState *s = ESP32S3_SOC(opaque);
++    async_run_on_cpu(CPU(&s->cpu[1]), esp32s3_apply_app_cpu_wait,
++                     RUN_ON_CPU_HOST_INT(wait));
++}
++
+ static void esp32s3_cpu_stall(void* opaque, int n, int level)
+ {
+     Esp32s3SocState *s = ESP32S3_SOC(opaque);
+@@ -775,6 +793,10 @@ static void esp32s3_machine_init(MachineState *machine)
+     {
+         ss->clock.peripheral_reset = esp32s3_peripheral_reset;
+         ss->clock.peripheral_reset_opaque = ss;
++        if (ESP32S3_CPU_COUNT > 1) {
++            ss->clock.app_cpu_wait = esp32s3_app_cpu_wait;
++            ss->clock.app_cpu_wait_opaque = ss;
++        }
+         sysbus_realize(SYS_BUS_DEVICE(&ss->clock), &error_fatal);
+         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->clock), 0);
+         memory_region_add_subregion_overlap(sys_mem, DR_REG_SYSTEM_BASE, mr, 0);
+diff --git a/hw/xtensa/esp32s3_clk.c b/hw/xtensa/esp32s3_clk.c
+index fe5329d..1c37af1 100644
+--- a/hw/xtensa/esp32s3_clk.c
++++ b/hw/xtensa/esp32s3_clk.c
+@@ -14,6 +14,8 @@
+ #include "qapi/error.h"
+ #include "qemu/error-report.h"
+ #include "hw/hw.h"
++#include "hw/core/cpu.h"
++#include "cpu.h"
+ #include "hw/sysbus.h"
+ #include "hw/irq.h"
+ #include "hw/qdev-properties.h"
+@@ -46,6 +48,12 @@ static uint32_t esp32s3_clock_get_ext_dev_enc_dec_ctrl(ESP32S3ClockState *s)
+     return s->sys_ext_dev_enc_dec_ctrl;
+ }
+ 
++/* Only the ROM's own wait parks the core, never a read by the app. */
++static bool esp32s3_clock_in_rom(uint32_t pc)
++{
++    return pc >= 0x40000000 && pc < 0x40060000;
++}
++
+ static uint64_t esp32s3_clock_read(void *opaque, hwaddr addr, unsigned int size)
+ {
+     ESP32S3ClockState *s = ESP32S3_CLOCK(opaque);
+@@ -58,6 +66,15 @@ static uint64_t esp32s3_clock_read(void *opaque, hwaddr addr, unsigned int size)
+             break;
+         case A_SYSTEM_CORE_1_CONTROL_1_REG:
+                 r = s->app_cpu_addr;
++            /* The APP CPU's ROM polls this register until the app gives it
++             * a boot address; the chip keeps that core stalled until the app
++             * starts it. Park it instead of letting every poll take the BQL
++             * from the PRO CPU loading the app.
++             */
++            if (!r && s->app_cpu_wait && current_cpu && current_cpu->cpu_index == 1 &&
++                esp32s3_clock_in_rom(cpu_env(current_cpu)->pc)) {
++                s->app_cpu_wait(s->app_cpu_wait_opaque, true);
++            }
+             break;
+         case A_SYSTEM_CPU_PER_CONF:
+             r = s->cpuperconf;
+@@ -100,6 +117,9 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
+         }
+         case A_SYSTEM_CORE_1_CONTROL_1_REG:
+                 s->app_cpu_addr = (uint32_t)value;
++            if (value && s->app_cpu_wait) {
++                s->app_cpu_wait(s->app_cpu_wait_opaque, false);
++            }
+             break;
+         case A_SYSTEM_CPU_INTR_FROM_CPU_0:
+         case A_SYSTEM_CPU_INTR_FROM_CPU_1:
 diff --git a/hw/xtensa/lilka_board_probe.c b/hw/xtensa/lilka_board_probe.c
 index 7631d96..b8a1f96 100644
 --- a/hw/xtensa/lilka_board_probe.c
@@ -118,6 +210,33 @@ index 7631d96..b8a1f96 100644
      bridge.clockless_spi = g_getenv("LILKA_QEMU_CLOCKLESS_SPI") != NULL;
      if (bridge.clockless_spi) {
          lilka_tcg_clockless_store = lilka_clockless_store;
+diff --git a/hw/xtensa/pic_cpu.c b/hw/xtensa/pic_cpu.c
+index 8cef88c..3c809e3 100644
+--- a/hw/xtensa/pic_cpu.c
++++ b/hw/xtensa/pic_cpu.c
+@@ -35,6 +35,8 @@
+ void check_interrupts(CPUXtensaState *env)
+ {
+     CPUState *cs = env_cpu(env);
++    /* Pairs with the lockless check in HELPER(check_interrupts). */
++    smp_mb();
+     int minlevel = xtensa_get_cintlevel(env);
+     uint32_t int_set_enabled = env->sregs[INTSET] &
+         (env->sregs[INTENABLE] | env->config->inttype_mask[INTTYPE_NMI]);
+diff --git a/include/hw/xtensa/esp32s3_clk.h b/include/hw/xtensa/esp32s3_clk.h
+index 87729c0..3fb9311 100644
+--- a/include/hw/xtensa/esp32s3_clk.h
++++ b/include/hw/xtensa/esp32s3_clk.h
+@@ -51,6 +51,9 @@ typedef struct ESP32S3ClockState {
+     uint32_t periph_reset[2];
+     void (*peripheral_reset)(void *opaque, unsigned bank, uint32_t mask);
+     void *peripheral_reset_opaque;
++    /* Stalls (true) or releases (false) the APP CPU. */
++    void (*app_cpu_wait)(void *opaque, bool wait);
++    void *app_cpu_wait_opaque;
+ 
+ 
+     /* IRQs for crosscore interrupts */
 diff --git a/meson.build b/meson.build
 index 1a01aae..c8c5278 100644
 --- a/meson.build
@@ -162,3 +281,49 @@ index 19c346f..fd8d71e 100644
      if (argc <= 1 || strcmp(argv[1], "--cpu-only") != 0) {
          return lilka_desktop_main();
      }
+diff --git a/target/xtensa/exc_helper.c b/target/xtensa/exc_helper.c
+index ca629f0..30450a6 100644
+--- a/target/xtensa/exc_helper.c
++++ b/target/xtensa/exc_helper.c
+@@ -118,8 +118,41 @@ void HELPER(waiti)(CPUXtensaState *env, uint32_t pc, uint32_t intlevel)
+     HELPER(exception)(env, EXCP_HLT);
+ }
+ 
++/* Whether check_interrupts() would raise an interrupt now. */
++static bool xtensa_irq_deliverable(CPUXtensaState *env)
++{
++    int minlevel = xtensa_get_cintlevel(env);
++    uint32_t int_set_enabled = qatomic_read(&env->sregs[INTSET]) &
++        (env->sregs[INTENABLE] | env->config->inttype_mask[INTTYPE_NMI]);
++
++    if (minlevel >= env->config->nmi_level) {
++        minlevel = env->config->nmi_level - 1;
++    }
++    for (int level = env->config->nlevel; level > minlevel; --level) {
++        if (env->config->level_mask[level] & int_set_enabled) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ void HELPER(check_interrupts)(CPUXtensaState *env)
+ {
++    /* Every critical section enters and leaves through here (RSIL, WSR.PS),
++     * and almost always nothing is pending: then check_interrupts() would
++     * change nothing, so skip the BQL both vCPUs otherwise fight over. A
++     * device raising an IRQ meanwhile sets INTSET and then runs its own
++     * check_interrupts() under the BQL; with a barrier on both sides
++     * (there and here, after this vCPU's PS/INTENABLE store) at least one
++     * of the two sees the other's write. A stale CPU_INTERRUPT_HARD is
++     * re-checked against the current level when it is taken.
++     */
++    smp_mb();
++    if (!qatomic_read(&env->pending_irq_level) &&
++        !(qatomic_read(&env_cpu(env)->interrupt_request) & CPU_INTERRUPT_HARD) &&
++        !xtensa_irq_deliverable(env)) {
++        return;
++    }
+     bql_lock();
+     check_interrupts(env);
+     bql_unlock();
