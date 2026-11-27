@@ -127,6 +127,22 @@ Rust-частина збирається як одна статична бібл
 
 Сайт статичний: workflow `Web` збирає `dist/web`, перевіряє запуск KeiraOS і після пушу в основну гілку публікує його на GitHub Pages. Один раз увімкніть це в налаштуваннях репозиторію: Settings → Pages → Source: GitHub Actions.
 
+Кнопка «Завантажити останню KeiraOS» бере останній реліз [lilka-dev/keira](https://github.com/lilka-dev/keira/releases) українською або англійською. Workflow кладе його поруч зі сторінкою (`firmware/latest.json`, `firmware/<тег>/KeiraOS_merged_LANG_*.bin`, як flasher.lilka.dev) і перед публікацією перевіряє, що саме цей реліз запускається. Локальна збірка без цих файлів бере копію з flasher.lilka.dev. Новий реліз Keira перевидає сайт через подію `repository_dispatch` типу `keira-release` (ту саму, яку чекає flasher): у workflow релізу Keira після завантаження файлів потрібен крок
+
+```yaml
+      - name: Notify flasher and emulator
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.LILKA_DISPATCH_TOKEN }}
+        run: |
+          for repo in lilka-dev/flasher lilka-dev/emulator; do
+            gh api "repos/$repo/dispatches" -f event_type=keira-release \
+              -f "client_payload[tag]=${{ steps.version.outputs.TAG }}"
+          done
+```
+
+і секрет `LILKA_DISPATCH_TOKEN` з правом запису Contents в обох репозиторіях.
+
 У браузері прошивка, стан флеш-пам'яті та файли SD зберігаються в IndexedDB цього сайту. Зміни, які програма записала на SD, потрапляють у сховище під час «Зупинити й зберегти»; там же можна завантажити SD як ZIP. Wi-Fi вимкнений: браузер не дає програмі сирих TCP/UDP-сокетів.
 
 Процесор інтерпретується (TCI), але з двома потоками (по одному на ядро ESP32-S3) KeiraOS показує перше зображення приблизно за 3,5 с і готове меню за 5 с (нативно — 2,5 с і 4 с). Важкий звук, як мелодія запуску, потребує більше процесора, ніж є в браузері, тож звучить розтягнуто (приблизно втричі). Перевірка без браузера:

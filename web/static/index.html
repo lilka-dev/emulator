@@ -62,7 +62,14 @@
 
     <fieldset id="setup">
       <legend>Профіль</legend>
-      <label class="file">Прошивка (.bin, з таблицею розділів)
+      <div class="row">
+        <button id="latest" class="primary">Завантажити останню KeiraOS</button>
+        <select id="latest-language" aria-label="Мова KeiraOS">
+          <option value="LANG_UK">українською</option>
+          <option value="LANG_EN">англійською</option>
+        </select>
+      </div>
+      <label class="file">…або власна прошивка (.bin, з таблицею розділів)
         <input id="firmware" type="file" accept=".bin">
       </label>
       <p id="firmware-name" class="hint">Прошивку ще не обрано.</p>

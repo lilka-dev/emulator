@@ -1,5 +1,12 @@
 name: Web
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  # Sent by lilka-dev/keira when it publishes a release, as for flasher.lilka.dev:
+  # redeploys the site with the new firmware (default branch only).
+  repository_dispatch:
+    types: [keira-release]
 permissions:
   contents: read
 env:
@@ -30,10 +37,32 @@ jobs:
           key: web-sysroot-${{ env.EMSDK_VERSION }}-${{ hashFiles('web/build.py') }}
       - name: Build
         run: python3 web/build.py --jobs 4
+      # The page's "download latest KeiraOS" uses firmware/latest.json and the
+      # merged images next to it (same origin, like flasher.lilka.dev).
+      - name: Latest KeiraOS release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release view -R lilka-dev/keira --json tagName --jq .tagName)
+          gh release download "$tag" -R lilka-dev/keira -p 'KeiraOS_merged_LANG_*.bin' -D "dist/web/firmware/$tag"
+          python3 - "$tag" <<'EOF'
+          import json, pathlib, sys
+          tag = sys.argv[1]
+          folder = pathlib.Path('dist/web/firmware', tag)
+          files = {path.stem.split('_merged_')[1]: f'firmware/{tag}/{path.name}'
+                   for path in sorted(folder.glob('KeiraOS_merged_LANG_*.bin'))}
+          assert 'LANG_UK' in files, files
+          latest = {'tag': tag, 'files': files}
+          pathlib.Path('dist/web/firmware/latest.json').write_text(json.dumps(latest, indent=2) + '\n')
+          EOF
+          cat dist/web/firmware/latest.json
+          echo "KEIRA_TAG=$tag" >> "$GITHUB_ENV"
+      # Boot the release users will get; a release that does not boot blocks the deploy.
       - name: Boot KeiraOS headless
         run: |
           node=$(ls -d "$EMSDK"/node/*/bin | tail -1)/node
-          "$node" web/test/boot.mjs firmware/KeiraOS_merged_LANG_UK.bin 120 --frame keira.ppm
+          "$node" web/test/boot.mjs "dist/web/firmware/$KEIRA_TAG/KeiraOS_merged_LANG_UK.bin" 120 --frame keira.ppm
       - name: Package
         run: tar -czf lilka-emulator-web.tar.gz -C dist web
       - uses: actions/upload-artifact@v4

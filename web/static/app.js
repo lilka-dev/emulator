@@ -27,6 +27,7 @@ const ui = {
   reset: $('reset'), stop: $('stop'), setup: $('setup'), firmware: $('firmware'),
   firmwareName: $('firmware-name'), app: $('app'), sd: $('sd'), sdSummary: $('sd-summary'),
   sdExport: $('sd-export'), sdClear: $('sd-clear'), newSession: $('new-session'),
+  latest: $('latest'), latestLanguage: $('latest-language'),
   threads: $('threads'), uart: $('uart'),
 };
 
@@ -129,6 +130,7 @@ async function boot() {
   FS.writeFile('/lilka/rom/esp32s3_rev0_rom.bin', new Uint8Array(await rom.arrayBuffer()));
   // Two interpreter threads boot KeiraOS about 2.5x faster than one.
   ui.threads.value = localStorage.getItem('lilka-threads') ?? 'multi';
+  ui.latestLanguage.value = localStorage.getItem('lilka-language') ?? 'LANG_UK';
   refreshSetup();
   setStatus('Готово');
 }
@@ -150,7 +152,52 @@ function refreshSetup() {
   });
   ui.sdSummary.textContent = `SD: ${files} файлів, ${(bytes / 1048576).toFixed(1)} МіБ.`;
   ui.run.disabled = running || !haveFirmware;
-  if (!running) showOverlay(haveFirmware ? 'Натисніть «Запустити»' : 'Оберіть прошивку й натисніть «Запустити»');
+  if (!running) {
+    showOverlay(haveFirmware ? 'Натисніть «Запустити»' : 'Завантажте останню KeiraOS або оберіть прошивку');
+  }
+}
+
+// Latest KeiraOS release. The deploy bundles it next to the page
+// (firmware/latest.json, same origin); a build without it uses the copy that
+// flasher.lilka.dev bundles, which GitHub Pages serves with CORS.
+const FLASHER = 'https://flasher.lilka.dev/';
+async function latestRelease(language) {
+  try {
+    const response = await fetch('firmware/latest.json', { cache: 'no-cache' });
+    if (response.ok) {
+      const latest = await response.json();
+      if (latest.files?.[language]) return { tag: latest.tag, url: latest.files[language] };
+    }
+  } catch { /* not bundled with this build */ }
+  const response = await fetch(FLASHER + 'firmware/releases.json', { cache: 'no-cache' });
+  if (!response.ok) throw new Error('Не вдалося отримати список версій KeiraOS');
+  const name = `KeiraOS_merged_${language}.bin`;
+  for (const release of await response.json()) {
+    if (release.draft || release.prerelease) continue;
+    const asset = release.assets?.find((item) => item.name === name && item.local_url);
+    if (asset) return { tag: release.tag_name, url: FLASHER + asset.local_url };
+  }
+  throw new Error('Не знайдено збірки KeiraOS ' + language);
+}
+async function downloadLatest() {
+  const language = ui.latestLanguage.value;
+  localStorage.setItem('lilka-language', language);
+  ui.latest.disabled = true;
+  try {
+    setStatus('Пошук останньої KeiraOS…');
+    const { tag, url } = await latestRelease(language);
+    setStatus(`Завантаження KeiraOS ${tag}…`);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`KeiraOS ${tag}: HTTP ${response.status}`);
+    const name = `KeiraOS_${tag}_${language}.bin`;
+    await chooseFirmware(new File([await response.arrayBuffer()], name));
+    setStatus(`KeiraOS ${tag} готова`);
+  } catch (error) {
+    setStatus('Помилка');
+    showOverlay(String(error.message ?? error));
+  } finally {
+    ui.latest.disabled = running;
+  }
 }
 
 async function chooseFirmware(file) {
@@ -393,6 +440,7 @@ function zip(entries) {
 }
 
 ui.firmware.addEventListener('change', () => ui.firmware.files[0] && chooseFirmware(ui.firmware.files[0]));
+ui.latest.addEventListener('click', downloadLatest);
 ui.app.addEventListener('change', async () => {
   const file = ui.app.files[0];
   pendingApp = file ? new Uint8Array(await file.arrayBuffer()) : null;
