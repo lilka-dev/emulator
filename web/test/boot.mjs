@@ -3,6 +3,7 @@
 //   node web/test/boot.mjs FIRMWARE.bin [WALL_SECONDS] [--threads single|multi]
 //                          [--frame out.ppm] [--app APP.bin] [--sd FOLDER]
 //                          [--audio out.pcm]   (s16le 48 kHz stereo, as drained)
+//                          [--keys MS:PIN,...] (press GPIO PIN at guest millisecond MS)
 //
 // Uses dist/web (python3 web/build.py), or LILKA_WEB_DIST. Exit status 0 means
 // the display showed something other than black before the time ran out.
@@ -24,6 +25,8 @@ const frameOut = option('--frame');
 const app = option('--app');
 const sdFolder = option('--sd');
 const audioOut = option('--audio');
+const keys = (option('--keys') ?? '').split(',').filter(Boolean)
+  .map((key) => key.split(':').map(Number)).sort((a, b) => a[0] - b[0]);
 const [firmware, seconds = '60'] = args;
 if (!firmware) {
   console.error('usage: node web/test/boot.mjs FIRMWARE.bin [WALL_SECONDS] [--threads single|multi]');
@@ -77,6 +80,18 @@ const drain = () => {
   Atomics.store(words, layout.audio_tail / 8, head);
 };
 const drainer = audioOut ? setInterval(drain, 10) : null;
+
+// Scripted presses: active-low pins, each held for 120 guest milliseconds.
+const input = new Uint32Array(memory, base + layout.input, 2);
+const setPin = (pin, high) => (high ? Atomics.or : Atomics.and)(input, pin >> 5, high ? 1 << (pin & 31) : ~(1 << (pin & 31)));
+const presser = keys.length ? setInterval(() => {
+  const ms = read64(layout.time) / 240e3;
+  for (const key of keys) {
+    if (!key.down && ms >= key[0]) { setPin(key[1], false); key.down = true; }
+    if (key.down && !key.up && ms >= key[0] + 120) { setPin(key[1], true); key.up = true; }
+  }
+  if (keys.every((key) => key.up)) clearInterval(presser);
+}, 5) : null;
 
 // When the screen first shows something other than black.
 let firstPicture = null;

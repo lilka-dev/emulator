@@ -122,6 +122,55 @@ index 1833637..953f413 100755
  esac
  
  # Now we have our CPU_CFLAGS we can check if we are targeting a 32 or
+diff --git a/hw/block/m25p80.c b/hw/block/m25p80.c
+index 46dbe7c..3cf6f90 100644
+--- a/hw/block/m25p80.c
++++ b/hw/block/m25p80.c
+@@ -571,6 +571,22 @@ static void blk_sync_complete(void *opaque, int ret)
+      */
+ }
+ 
++#ifdef __EMSCRIPTEN__
++/*
++ * Every in-flight asynchronous write holds a coroutine: a stack plus an
++ * Asyncify buffer, real memory in a wasm heap. File writes are relayed to the
++ * browser's main thread and finish slower than firmware programs pages, so a
++ * flash rewrite (KeiraOS multiboot: ~10k pages) exhausts the heap. Write
++ * synchronously instead: one request at a time, nothing lost on shutdown.
++ */
++static void flash_sync_write(Flash *s, int64_t off, int64_t len)
++{
++    if (blk_pwrite(s->blk, off, len, s->storage + off, 0) < 0) {
++        qemu_log_mask(LOG_GUEST_ERROR, "M25P80: flash write failed\n");
++    }
++}
++#endif
++
+ static void flash_sync_page(Flash *s, int page)
+ {
+     QEMUIOVector *iov;
+@@ -578,6 +594,10 @@ static void flash_sync_page(Flash *s, int page)
+     if (!s->blk || !blk_is_writable(s->blk)) {
+         return;
+     }
++#ifdef __EMSCRIPTEN__
++    flash_sync_write(s, (int64_t)page * s->pi->page_size, s->pi->page_size);
++    return;
++#endif
+ 
+     iov = g_new(QEMUIOVector, 1);
+     qemu_iovec_init(iov, 1);
+@@ -596,6 +616,10 @@ static inline void flash_sync_area(Flash *s, int64_t off, int64_t len)
+     }
+ 
+     assert(!(len % BDRV_SECTOR_SIZE));
++#ifdef __EMSCRIPTEN__
++    flash_sync_write(s, off, len);
++    return;
++#endif
+     iov = g_new(QEMUIOVector, 1);
+     qemu_iovec_init(iov, 1);
+     qemu_iovec_add(iov, s->storage + off, len);
 diff --git a/hw/core/loader.c b/hw/core/loader.c
 index 31593a1..a385e37 100644
 --- a/hw/core/loader.c

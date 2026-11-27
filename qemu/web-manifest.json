@@ -3,7 +3,7 @@
   "patches": [
     {
       "file": "patches/web/qemu-emscripten-host.patch",
-      "sha256": "010231b2369d256566d61fed31486b2d3b36642008333ecc4653d934f59fa65a"
+      "sha256": "1fe06efc10072f495e8e627e9425330a6a96dbdd5431e3ce505b321bb79e16e6"
     },
     {
       "file": "patches/web/qemu-lilka-web.patch",
@@ -30,6 +30,10 @@
     {
       "file": "configure",
       "sha256": "b26bbc10d6e9f96a01ded774f49ee832ac0a81f74c25984ccc4eb4232de95959"
+    },
+    {
+      "file": "hw/block/m25p80.c",
+      "sha256": "021393952966441cf3f2a246dbe96b7560c4b0124b27e6c4038986b025a6fd2d"
     },
     {
       "file": "hw/core/loader.c",
