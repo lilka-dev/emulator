@@ -240,9 +240,6 @@ impl BoardDevice {
         next.state.last_audio_tick = now;
         next.state.trace_enabled = self.state.trace_enabled;
         next.state.hardware.audio_completion_queue = self.state.hardware.audio_completion_queue;
-        next.state.hardware.audio_wait_refill = self.state.hardware.audio_wait_refill;
-        next.state.hardware.audio_refill_waits = self.state.hardware.audio_refill_waits;
-        next.state.hardware.audio_refill_skips = self.state.hardware.audio_refill_skips;
         if let Some(trace) = &mut self.state.hardware.dma_trace {
             let mut trace = std::mem::take(trace);
             trace.clear();

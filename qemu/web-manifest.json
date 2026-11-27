@@ -3,7 +3,7 @@
   "patches": [
     {
       "file": "patches/web/qemu-emscripten-host.patch",
-      "sha256": "2869d39883d05140ed721fe7dcb49ac82bc7fd7fd5830cd12ed41a064f701027"
+      "sha256": "010231b2369d256566d61fed31486b2d3b36642008333ecc4653d934f59fa65a"
     },
     {
       "file": "patches/web/qemu-lilka-web.patch",
@@ -11,6 +11,10 @@
     }
   ],
   "source_files": [
+    {
+      "file": "accel/tcg/cputlb.c",
+      "sha256": "df66fc031a2c65a24a843b20f3209fa5a000430e4b01547436c94dbe7dff967c"
+    },
     {
       "file": "backends/meson.build",
       "sha256": "22154b09fdad91dfd7e63f7bad020a4c4511ce9efc9ac2082ece6334325016c3"
@@ -21,7 +25,7 @@
     },
     {
       "file": "configs/meson/emscripten.txt",
-      "sha256": "e54af9811aae8dfb57f7a7ce07fdb3fcdef78e8730ff7390f460b1dc97872b39"
+      "sha256": "7a764f4b221c2889c21692e287eb401f7c0f1a0966a42a1bfbcdc9e74d2ef906"
     },
     {
       "file": "configure",
@@ -109,7 +113,7 @@
     },
     {
       "file": "tcg/tci.c",
-      "sha256": "69ec4c40712ba4fde8f003003511e6a0394d9a0e26ed5a64e9473b9976c19cfc"
+      "sha256": "0c4d0694fa6fb71e04c695df4b4284f228fd82c7ebfad247cd9131c186d305e3"
     },
     {
       "file": "util/cacheflush.c",
@@ -126,6 +130,10 @@
     {
       "file": "util/oslib-posix.c",
       "sha256": "ea3349518d22f34f226e3e33e3128935d4fd2ccc68eae6e080eb08fd17bdfe70"
+    },
+    {
+      "file": "util/qemu-thread-posix.c",
+      "sha256": "fff14f368ee4eebceb340ae738d1f8fa4bece77b043b77b1277617d612393c7f"
     }
   ]
 }

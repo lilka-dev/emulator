@@ -147,9 +147,6 @@ fn prepare(options: &Options) -> Result<Vec<String>> {
         "LILKA_QEMU_SERVICE_CLOCK",
         "LILKA_QEMU_ROM_UDIV",
         "LILKA_QEMU_ROM_DIV_COMPAT",
-        // The interpreter cannot always refill I2S buffers in time: play only
-        // what the firmware wrote instead of looping stale buffers.
-        "LILKA_QEMU_AUDIO_REFILL_WAIT",
     ] {
         variables.push((key, "1".into()));
     }
