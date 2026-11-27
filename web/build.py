@@ -100,6 +100,7 @@ cpp_link_args = [{quoted(LDFLAGS)}]
 
 
 def unpack(name, url, expected):
+    (CACHE / 'dl').mkdir(parents=True, exist_ok=True)
     archive = native.download(url, CACHE / 'dl' / url.rsplit('/', 1)[1], expected)
     source = CACHE / 'src' / archive.name.split('.tar')[0]
     if not source.exists():
@@ -306,6 +307,7 @@ def main():
     if sys.version_info < (3, 10):
         parser.error('Emscripten needs Python 3.10+; run this script with it')
     env = emscripten_env()
+    CACHE.mkdir(parents=True, exist_ok=True)
     build_dependencies(env, args.jobs)
     if args.deps_only:
         return

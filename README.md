@@ -123,7 +123,9 @@ python3.11 web/serve.py   # http://localhost:8080
 
 Rust-частина збирається як одна статична бібліотека: `cargo build -p lilka-emulator --target wasm32-unknown-emscripten --no-default-features --features web` з `-Zbuild-std` (std перезбирається з атомарними операціями для спільної пам'яті потоків). Результат — `dist/web`: `qemu-system-xtensa.js/.wasm`, сторінка, ROM та ліцензії.
 
-Сторінка потребує `SharedArrayBuffer`, тому сервер має надсилати заголовки `Cross-Origin-Opener-Policy: same-origin` і `Cross-Origin-Embedder-Policy: require-corp` (`web/serve.py` так робить). Для хостингу без власних заголовків (наприклад, GitHub Pages) їх додає `coi-serviceworker.js`; потрібен HTTPS або localhost.
+Сторінка потребує `SharedArrayBuffer`, тому сервер має надсилати заголовки `Cross-Origin-Opener-Policy: same-origin` і `Cross-Origin-Embedder-Policy: require-corp` (`web/serve.py` так робить). Для хостингу без власних заголовків (наприклад, GitHub Pages) їх додає `coi-serviceworker.js`; потрібен HTTPS або localhost, а перше відкриття сторінки один раз перезавантажує її.
+
+Сайт статичний: workflow `Web` збирає `dist/web`, перевіряє запуск KeiraOS і після пушу в основну гілку публікує його на GitHub Pages. Один раз увімкніть це в налаштуваннях репозиторію: Settings → Pages → Source: GitHub Actions.
 
 У браузері прошивка, стан флеш-пам'яті та файли SD зберігаються в IndexedDB цього сайту. Зміни, які програма записала на SD, потрапляють у сховище під час «Зупинити й зберегти»; там же можна завантажити SD як ZIP. Wi-Fi вимкнений: браузер не дає програмі сирих TCP/UDP-сокетів.
 
