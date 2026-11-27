@@ -21,7 +21,7 @@ import build as native  # noqa: E402  (shared download/checksum helpers)
 CACHE = ROOT / '.build/web'
 SYSROOT = CACHE / 'sysroot'
 DEPENDENCIES = [
-    ('zlib', 'https://zlib.net/fossils/zlib-1.3.1.tar.gz',
+    ('zlib', 'https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz',
      '9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23'),
     ('libffi', 'https://github.com/libffi/libffi/releases/download/v3.4.7/libffi-3.4.7.tar.gz',
      '138607dee268bdecf374adf9144c00e839e38541f75f24a1fcf18b78fda48b2d'),
