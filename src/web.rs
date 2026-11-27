@@ -110,8 +110,9 @@ fn prepare(options: &Options) -> Result<Vec<String>> {
     }
     let mut flash = fs::read(&flash_path)?;
     ensure!(flash.len() == FLASH, "Incomplete session storage");
-    // The browser has no network, so Wi-Fi stays off and Keira's saved emulator
-    // network is cleared, as on a desktop profile without Wi-Fi.
+    // The browser has no network: no radio is emulated and Keira's saved
+    // emulator network is cleared. compat still widens Keira's VFS table, so
+    // switching Wi-Fi on in Keira's own settings cannot abort the firmware.
     let compatibility = firmware::compat::prepare(&mut flash, false)?;
     let wifi_changed = compatibility.keira_known && firmware::nvs::configure_wifi(&mut flash, None)?;
     if compatibility.changed || wifi_changed {

@@ -16,6 +16,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.dont_write_bytecode = True  # no __pycache__ next to build.py in the repo
 import build as native  # noqa: E402  (shared download/checksum helpers)
 
 CACHE = ROOT / '.build/web'

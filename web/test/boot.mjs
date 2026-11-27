@@ -4,6 +4,7 @@
 //                          [--frame out.ppm] [--app APP.bin] [--sd FOLDER]
 //                          [--audio out.pcm]   (s16le 48 kHz stereo, as drained)
 //                          [--keys MS:PIN,...] (press GPIO PIN at guest millisecond MS)
+//                          [--uart-lines N]    (UART lines to print, default 30)
 //
 // Uses dist/web (python3 web/build.py), or LILKA_WEB_DIST. Exit status 0 means
 // the display showed something other than black before the time ran out.
@@ -25,6 +26,7 @@ const frameOut = option('--frame');
 const app = option('--app');
 const sdFolder = option('--sd');
 const audioOut = option('--audio');
+const uartLines = Number(option('--uart-lines', '30'));
 const keys = (option('--keys') ?? '').split(',').filter(Boolean)
   .map((key) => key.split(':').map(Number)).sort((a, b) => a[0] - b[0]);
 const [firmware, seconds = '60'] = args;
@@ -138,7 +140,7 @@ if (frameOut) {
 }
 try {
   const log = FS.readFile('/tmp/lilka-uart.log', { encoding: 'utf8' });
-  console.log('--- UART (last 30 lines) ---\n' + log.split('\n').slice(-30).join('\n'));
+  console.log(`--- UART (last ${uartLines} lines) ---\n` + log.split('\n').slice(-uartLines).join('\n'));
 } catch {
   console.log('--- no UART log ---');
 }
