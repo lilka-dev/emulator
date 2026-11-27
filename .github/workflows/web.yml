@@ -27,6 +27,11 @@ jobs:
           "$RUNNER_TEMP/emsdk/emsdk" install "$EMSDK_VERSION"
           "$RUNNER_TEMP/emsdk/emsdk" activate "$EMSDK_VERSION"
           echo "EMSDK=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+      # The page's audio player against slow, fast and uneven PCM (no build needed).
+      - name: Audio player
+        run: |
+          node=$(ls -d "$EMSDK"/node/*/bin | tail -1)/node
+          "$node" web/test/audio.mjs
       - name: Rust target
         run: |
           rustup target add wasm32-unknown-emscripten

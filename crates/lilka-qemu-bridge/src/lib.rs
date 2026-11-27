@@ -558,10 +558,15 @@ pub unsafe extern "C" fn lilka_board_finish(p: *mut Bridge) {
     }
     if let Some(live) = &b.live {
         live.push_audio(&final_frames);
-        live.set_status(3);
     }
-    if let Err(e) = b.dump() {
+    let dumped = b.dump();
+    if let Err(e) = &dumped {
         eprintln!("Lilka output: {e}");
+    }
+    // Only after the SD card is written back to its folder: the browser page
+    // waits for this status before it saves the folder and reloads.
+    if let Some(live) = &b.live {
+        live.set_status(if dumped.is_ok() { 3 } else { 4 });
     }
 }
 

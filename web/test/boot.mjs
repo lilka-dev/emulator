@@ -5,9 +5,12 @@
 //                          [--audio out.pcm]   (s16le 48 kHz stereo, as drained)
 //                          [--keys MS:PIN,...] (press GPIO PIN at guest millisecond MS)
 //                          [--uart-lines N]    (UART lines to print, default 30)
+//                          [--audio-trace out.csv] (wall ms, PCM frames, guest ms every 5 ms)
 //
 // Uses dist/web (python3 web/build.py), or LILKA_WEB_DIST. Exit status 0 means
-// the display showed something other than black before the time ran out.
+// the display showed something other than black and the emulator was still
+// running (or paused) when the time ran out: a firmware that lights the screen
+// and then fails or stops does not pass.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,6 +29,7 @@ const frameOut = option('--frame');
 const app = option('--app');
 const sdFolder = option('--sd');
 const audioOut = option('--audio');
+const audioTrace = option('--audio-trace');
 const uartLines = Number(option('--uart-lines', '30'));
 const keys = (option('--keys') ?? '').split(',').filter(Boolean)
   .map((key) => key.split(':').map(Number)).sort((a, b) => a[0] - b[0]);
@@ -76,12 +80,20 @@ const drain = () => {
   const tail = Atomics.load(words, layout.audio_tail / 8);
   const count = Number(head - tail);
   if (!count) return;
-  const chunk = new Uint32Array(count);
-  for (let i = 0; i < count; i++) chunk[i] = ring[Number((tail + BigInt(i)) % BigInt(layout.audio_capacity))];
-  audio.push(chunk);
+  if (audioOut) {
+    const chunk = new Uint32Array(count);
+    for (let i = 0; i < count; i++) chunk[i] = ring[Number((tail + BigInt(i)) % BigInt(layout.audio_capacity))];
+    audio.push(chunk);
+  }
   Atomics.store(words, layout.audio_tail / 8, head);
 };
-const drainer = audioOut ? setInterval(drain, 10) : null;
+// An undrained ring fills in 2 s and stops the trace's frame count.
+const drainer = audioOut || audioTrace ? setInterval(drain, 10) : null;
+
+// Production timeline of the PCM ring, for web/test/audio.mjs.
+const trace = [];
+const tracer = audioTrace ? setInterval(() => trace.push(
+  `${(performance.now() - started).toFixed(1)},${read64(layout.audio_head)},${(read64(layout.time) / 240e3).toFixed(2)}`), 5) : null;
 
 // Scripted presses: active-low pins, each held for 120 guest milliseconds.
 const input = new Uint32Array(memory, base + layout.input, 2);
@@ -124,8 +136,16 @@ while (performance.now() < deadline) {
   if (status >= 3) break;
 }
 
+const STATUS = ['starting', 'running', 'paused', 'finished', 'failed'];
+const finalStatus = Atomics.load(u32, layout.status / 4);
+console.log(`final status: ${STATUS[finalStatus] ?? finalStatus}`);
+if (audioTrace) {
+  clearInterval(tracer);
+  fs.writeFileSync(audioTrace, 'wall_ms,frames,guest_ms\n' + trace.join('\n') + '\n');
+  console.log('audio trace:', audioTrace, trace.length, 'samples');
+}
+clearInterval(drainer);
 if (audioOut) {
-  clearInterval(drainer);
   drain();
   fs.writeFileSync(audioOut, Buffer.concat(audio.map((chunk) => Buffer.from(chunk.buffer))));
   console.log('audio:', audioOut, audio.reduce((sum, chunk) => sum + chunk.length, 0), 'frames');
@@ -144,4 +164,7 @@ try {
 } catch {
   console.log('--- no UART log ---');
 }
-process.exit(lit ? 0 : 1);
+const alive = finalStatus === 1 || finalStatus === 2;
+if (!lit) console.error('FAIL: the display stayed black');
+if (!alive) console.error(`FAIL: the emulator was ${STATUS[finalStatus] ?? finalStatus} at the end, not running`);
+process.exit(lit && alive ? 0 : 1);

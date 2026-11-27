@@ -36,8 +36,16 @@ let FS;
 let live;
 let pendingApp = null;
 let running = false;
+let stopping = false;
+// Set while this page holds changes not yet saved to IndexedDB.
+let unsaved = false;
+// What the stop button does once stopping has begun (null: stop).
+let stopAction = null;
 const log = [];
 const timers = [];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Saving a large SD card can take a while; after this the user may give up on it.
+const SAVE_WARNING_MS = 15000;
 function remember(line) {
   log.push(line);
   if (log.length > 500) log.splice(0, log.length - 500);
@@ -237,6 +245,7 @@ async function start() {
   await startAudio();
   emulator.callMain(args);
   running = true;
+  unsaved = true;
   showOverlay('');
   ui.canvas.focus();
   for (const button of [ui.pause, ui.reset, ui.stop]) button.disabled = false;
@@ -245,6 +254,16 @@ async function start() {
   // Flash writes are file writes; keep IndexedDB close behind them.
   timers.push(setInterval(() => sync(false).catch(console.warn), 15000));
 }
+
+// For the browser console: counters of the running session, audio included.
+globalThis.lilkaStats = () => live && {
+  status: live.status,
+  guestSeconds: live.guestSeconds,
+  pcmFrames: live.wide(live.layout.audio_head),
+  playedFrames: live.wide(live.layout.played),
+  underruns: live.wide(live.layout.underruns),
+  playbackDropped: live.wide(live.layout.playback_dropped),
+};
 
 let shownFrame = 0;
 let drawnFrames = 0;
@@ -267,11 +286,12 @@ function draw() {
 let last = { wall: performance.now(), guest: 0, frames: 0 };
 function report() {
   const status = live.status;
+  if (stopping) return;
   if (status === STATUS_FAILED || status === STATUS_FINISHED) {
     running = false;
-    timers.forEach(clearInterval);
+    stopTimers();
     readUart();
-    sync(false).catch(console.warn);
+    sync(false).then(() => (unsaved = false), console.warn);
     const reason = log.filter((line) => line.startsWith('Lilka:') || line.includes('rror')).slice(-3).join('\n');
     showOverlay(status === STATUS_FAILED ? 'Не вдалося запустити:\n' + reason : 'Зупинено');
     setStatus(status === STATUS_FAILED ? 'Помилка' : 'Зупинено');
@@ -329,21 +349,80 @@ function reset() {
   live.running = true;
   emulator._lilka_web_request(1);
 }
+function stopTimers() {
+  timers.forEach(clearInterval);
+  timers.length = 0;
+}
+/** The stop button, once stopping has begun, offers `label` instead. */
+function offer(label, action) {
+  ui.stop.textContent = label;
+  ui.stop.disabled = false;
+  stopAction = action;
+}
+// QEMU initializes once per process, like the desktop app: start over.
+function restart() {
+  unsaved = false;
+  location.reload();
+}
 async function stop() {
-  if (!running) return;
-  ui.stop.disabled = true;
+  if (!running || stopping) return;
+  stopping = true;
+  stopTimers();
+  for (const button of [ui.pause, ui.reset, ui.stop]) button.disabled = true;
   setStatus('Збереження…');
   live.running = true;
   emulator._lilka_web_request(2);
-  // The board writes SD changes back to the folder last, then leaves a marker.
-  const deadline = performance.now() + 15000;
-  while (!exists(OUTPUT + '/sd-folder-flushed') && performance.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  // The board writes the SD card back to its folder and only then reports
+  // FINISHED (FAILED if that write failed). Never reload before that: a slow
+  // write keeps going, and only the user may give up on it.
+  const started = performance.now();
+  while (live.status !== STATUS_FINISHED && live.status !== STATUS_FAILED) {
+    if (!stopAction && performance.now() - started > SAVE_WARNING_MS) {
+      setStatus('Збереження триває…');
+      showOverlay('Запис SD-карти триває довше, ніж зазвичай. Сторінка оновиться, щойно він завершиться.');
+      offer('Перезавантажити без збереження', () => {
+        if (confirm('Зміни на SD-карті й у флеш-пам\'яті з останніх секунд буде втрачено. Перезавантажити?')) restart();
+      });
+    }
+    await sleep(50);
   }
-  await sync(false);
-  // QEMU initializes once per process, like the desktop app: start over.
-  location.reload();
+  running = false;
+  stopAction = null;
+  ui.stop.disabled = true;
+  readUart();
+  await persist(live.status === STATUS_FINISHED && exists(OUTPUT + '/sd-folder-flushed'));
 }
+/** Saves the stopped session to IndexedDB; reloads only once that worked. */
+async function persist(sdWritten) {
+  setStatus('Збереження в браузері…');
+  try {
+    await sync(false);
+  } catch (error) {
+    setStatus('Помилка збереження');
+    showOverlay('Не вдалося записати дані в сховище браузера:\n' + String(error.message ?? error) +
+      '\nНе закривайте сторінку: дані ще в ній.');
+    offer('Спробувати ще раз', () => {
+      ui.stop.disabled = true;
+      stopAction = null;
+      persist(sdWritten);
+    });
+    return;
+  }
+  unsaved = false;
+  if (sdWritten) {
+    restart();
+    return;
+  }
+  const reason = log.filter((line) => line.startsWith('Lilka') || line.includes('rror')).slice(-3).join('\n');
+  setStatus('SD не збережено');
+  showOverlay('Зміни на SD-карті не записано:\n' + (reason || 'емулятор завершився з помилкою') +
+    '\nСтан флеш-пам\'яті збережено.');
+  offer('Перезавантажити', restart);
+}
+// Closing the tab now would lose what is not in IndexedDB yet.
+addEventListener('beforeunload', (event) => {
+  if (unsaved) event.preventDefault();
+});
 
 addEventListener('keydown', (event) => {
   if (!running || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
@@ -475,7 +554,7 @@ ui.run.addEventListener('click', () => start().catch((error) => {
 }));
 ui.pause.addEventListener('click', togglePause);
 ui.reset.addEventListener('click', reset);
-ui.stop.addEventListener('click', stop);
+ui.stop.addEventListener('click', () => (stopAction ?? stop)());
 
 boot().catch((error) => {
   console.error(error);
