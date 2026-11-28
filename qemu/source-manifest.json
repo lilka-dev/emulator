@@ -77,7 +77,7 @@
     },
     {
       "file": "patches/qemu-uart-input.patch",
-      "sha256": "11bbd44a53dff9247fd2d2cb37d5d881ee6af0afad13c5808ce91a4ecb12e90e"
+      "sha256": "a60ab89b1db2bef85f0b6731ae07d56d608434a0bcf961f07aea8457a27f5f28"
     }
   ],
   "source_files": [
@@ -195,7 +195,7 @@
     },
     {
       "file": "hw/misc/esp32c3_jtag.c",
-      "sha256": "aa9a729954a2fc6775d465a0261db00acd0b06b54719ac827a3d05fd760cb6ab"
+      "sha256": "6efc14a0d1b29b1a3849f14fb9ec6778a07cd4e23f33199aa03c16b3c9f98516"
     },
     {
       "file": "include/hw/misc/esp32c3_jtag.h",

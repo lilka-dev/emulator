@@ -179,7 +179,7 @@
  }
  
  static void esp32c3_jtag_init(Object *obj)
-@@ -55,7 +127,14 @@
+@@ -55,7 +127,15 @@
      memory_region_init_io(&s->iomem, obj, &esp32c3_jtag_ops, s,
                            TYPE_ESP32C3_JTAG, ESP32C3_JTAG_REGS_SIZE);
      sysbus_init_mmio(sbd, &s->iomem);
@@ -190,11 +190,12 @@
 +
 +static const Property cdc_properties[] = {
 +    DEFINE_PROP_CHR("chardev", ESP32C3UsbJtagState, chr),
++    DEFINE_PROP_END_OF_LIST(),
 +};
  
  static void esp32c3_jtag_class_init(ObjectClass *klass, void *data)
  {
-@@ -64,6 +143,7 @@
+@@ -64,6 +144,7 @@
  
      rc->phases.hold = esp32c3_jtag_reset_hold;
      dc->realize = esp32c3_jtag_realize;
