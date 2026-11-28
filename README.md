@@ -102,6 +102,58 @@ python3.11 build.py
 
 Збирається той самий QEMU, плюс патч `qemu/patches/qemu-darwin-host.patch`: фронтенд компонується з фреймворками AppKit, Foundation, CoreGraphics та іншими замість Linux-бібліотек, а символи `lilka_cpu_*` залишаються експортованими через `-export_dynamic`. Після `strip` бінарник підписується ad-hoc, бо Apple Silicon не запускає непідписаний код. Міст `liblilka_qemu_board_bridge.so` на macOS — це dylib під тим самим ім'ям. Дані профілів зберігаються в `~/Library/Application Support/lilka-emulator`. `--portable` доступний лише на Linux.
 
+## Збірка — браузер (WebAssembly)
+
+Той самий QEMU з платою Lilka збирається Emscripten у WebAssembly й працює на сторінці без встановлення. Потрібні [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (`emcc` у `PATH` або змінна `EMSDK`; без них скрипт шукає `.build/emsdk`), Rust stable з ціллю й вихідниками std, Python 3.10+, Ninja, `patch`, `pkg-config`, autotools-збірка (`make`) та Node (входить до emsdk).
+
+```sh
+git clone https://github.com/emscripten-core/emsdk.git .build/emsdk
+EMSDK_PYTHON=python3.11 .build/emsdk/emsdk install latest
+EMSDK_PYTHON=python3.11 .build/emsdk/emsdk activate latest
+rustup target add wasm32-unknown-emscripten
+rustup component add rust-src
+python3.11 web/build.py
+python3.11 web/serve.py   # http://localhost:8080
+```
+
+Перша збірка кросс-компілює zlib, libffi, pixman, GLib, libgpg-error і libgcrypt у `.build/web/sysroot` (перевірені SHA-256, потрібен інтернет), далі готує вихідники QEMU так само, як нативна збірка, і додає патчі з `qemu/web-manifest.json`:
+
+- `qemu/patches/web/qemu-emscripten-host.patch` — підтримка Emscripten із QEMU 10.1 (автор Kohei Tokunaga), перенесена на 9.2: TCI-інтерпретатор замість JIT, coroutine через fiber-и Emscripten, виправлення типів вказівників на функції (WebAssembly перевіряє сигнатуру кожного непрямого виклику). Плюс прискорення для браузера: прямі виклики TCG-хелперів замість libffi, швидкий шлях TLB у TCI (як у нативних бекендах), коротке очікування на м'ютексах перед сном (пробудження потоку в wasm дороге), `setjmp`/`longjmp` на винятках WebAssembly замість JavaScript і MMIO посеред блоку без перекомпіляції, коли icount вимкнений (`LILKA_QEMU_STRICT_IO=1` повертає точну поведінку).
+- `qemu/patches/web/qemu-lilka-web.patch` — міст плати компонується статично (без `dlopen`), а `main` передає керування `src/web.rs`.
+
+Rust-частина збирається як одна статична бібліотека: `cargo build -p lilka-emulator --target wasm32-unknown-emscripten --no-default-features --features web` з `-Zbuild-std` (std перезбирається з атомарними операціями для спільної пам'яті потоків). Результат — `dist/web`: `qemu-system-xtensa.js/.wasm`, сторінка, ROM та ліцензії.
+
+Сторінка потребує `SharedArrayBuffer`, тому сервер має надсилати заголовки `Cross-Origin-Opener-Policy: same-origin` і `Cross-Origin-Embedder-Policy: require-corp` (`web/serve.py` так робить). Для хостингу без власних заголовків (наприклад, GitHub Pages) їх додає `coi-serviceworker.js`; потрібен HTTPS або localhost, а перше відкриття сторінки один раз перезавантажує її.
+
+Сайт статичний: workflow `Web` збирає `dist/web`, перевіряє запуск KeiraOS і після пушу в основну гілку публікує його на GitHub Pages. Один раз увімкніть це в налаштуваннях репозиторію: Settings → Pages → Source: GitHub Actions.
+
+Кнопка «Завантажити останню KeiraOS» бере останній реліз [lilka-dev/keira](https://github.com/lilka-dev/keira/releases) українською або англійською. Workflow кладе його поруч зі сторінкою (`firmware/latest.json`, `firmware/<тег>/KeiraOS_merged_LANG_*.bin`, як flasher.lilka.dev) і перед публікацією перевіряє, що саме цей реліз запускається. Локальна збірка без цих файлів бере копію з flasher.lilka.dev. Новий реліз Keira перевидає сайт через подію `repository_dispatch` типу `keira-release` (ту саму, яку чекає flasher): у workflow релізу Keira після завантаження файлів потрібен крок
+
+```yaml
+      - name: Notify flasher and emulator
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.LILKA_DISPATCH_TOKEN }}
+        run: |
+          for repo in lilka-dev/flasher lilka-dev/emulator; do
+            gh api "repos/$repo/dispatches" -f event_type=keira-release \
+              -f "client_payload[tag]=${{ steps.version.outputs.TAG }}"
+          done
+```
+
+і секрет `LILKA_DISPATCH_TOKEN` з правом запису Contents в обох репозиторіях.
+
+У браузері прошивка, стан флеш-пам'яті та файли SD зберігаються в IndexedDB цього сайту. Зміни, які програма записала на SD, потрапляють у сховище під час «Зупинити й зберегти»; там же можна завантажити SD як ZIP. Сторінка перезавантажується лише тоді, коли SD записано й збережено в IndexedDB; якщо запис триває понад 15 с, вона чекає далі й дозволяє перезавантажитися без збереження, а помилку показує замість перезавантаження. Wi-Fi вимкнений: браузер не дає програмі сирих TCP/UDP-сокетів.
+
+Процесор інтерпретується (TCI), але з двома потоками (по одному на ядро ESP32-S3) KeiraOS показує перше зображення приблизно за 3–4 с і готове меню за 5 с (нативно — 2,5 с і 4 с). Ядра емулюються окремими потоками, що часто чекають одне на одного, тож запуск залежить від вільних ядер комп'ютера: коли інша програма чи ще одна вкладка з емулятором займає 2–3 ядра, перше зображення з'являється за 5–6 с. Мелодію запуску KeiraOS пише в I2S по одному семплу, і інтерпретований процесор ледве встигає: QEMU тоді притримує час гостя, тож звук надходить на 93–98% від 48 кГц, а потім надолужує до 102%. Програвач (`web/static/audio-worklet.js`) вимірює цей темп і відтворює з ним (у межах 90–105%), тож мелодія звучить без розривів і переповнень, лише трохи нижче. Перевірки без браузера:
+
+```sh
+node web/test/boot.mjs firmware/KeiraOS_merged_LANG_UK.bin 40 --frame /tmp/keira.ppm --audio-trace /tmp/audio.csv
+node web/test/audio.mjs /tmp/audio.csv
+```
+
+`boot.mjs` проходить, лише якщо екран засвітився і емулятор наприкінці ще працює; `audio.mjs` перевіряє програвач на повільному, швидкому, нерівному й записаному потоці звуку.
+
 ## Робота
 
 Створіть профіль, оберіть `.bin` і теку для емуляції SD(рекомендується обирати одразу як теку в профілі). Дані створюються та зберігаються в стандартному користувацькому каталозі `lilka-emulator`; `LILKA_DATA_DIR` перевизначає його. Зазвичай створює в `.local/share/lilka-emulator`  Файл `portable.txt` поряд із програмою вмикає локальну теку `data`.
@@ -113,6 +165,7 @@ python3.11 build.py
  - Працювати з потенційно всіма .bin софтом.
  - Емуляція екрану, кнопок керування, аудіо I2S та буззера.
  - **ЕКСПЕРИМЕНТАЛЬНА** підтримка Wi-Fi, може використовуватись наприклад для встановлення додатків з каталога.
+ - Працювати в браузері (WebAssembly): повільніше за нативну збірку й без Wi-Fi.
 ### Чого немає але планується(типу Roadmap)
  - UART емуляція для логів, і для Lua Live(частково все це є, треба тільки пронести в інтерфейс)
  - Не вся внутрішня емуляція точна

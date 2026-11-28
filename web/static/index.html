@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lilka Emulator</title>
+<link rel="icon" href="lilka.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script>
+  // Threads need SharedArrayBuffer, which needs cross-origin isolation. A host
+  // that cannot send the COOP/COEP headers gets them from this service worker.
+  if (!window.crossOriginIsolated && window.isSecureContext && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('coi-serviceworker.js').then((registration) => {
+      if (!sessionStorage.getItem('lilka-coi-reload')) {
+        sessionStorage.setItem('lilka-coi-reload', '1');
+        if (registration.active && !navigator.serviceWorker.controller) location.reload();
+        navigator.serviceWorker.addEventListener('controllerchange', () => location.reload());
+      }
+    });
+  }
+</script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header>
+  <img src="lilka.svg" alt="" width="32" height="32">
+  <h1>Lilka Emulator</h1>
+  <span id="status" class="status">Завантаження…</span>
+</header>
+
+<main>
+  <section class="device" aria-label="Пристрій">
+    <div class="dpad">
+      <button data-button="up" aria-label="Вгору">▲</button>
+      <button data-button="left" aria-label="Вліво">◀</button>
+      <button data-button="right" aria-label="Вправо">▶</button>
+      <button data-button="down" aria-label="Вниз">▼</button>
+    </div>
+    <div class="screen">
+      <canvas id="screen" width="280" height="240" tabindex="0" aria-label="Екран Lilka"></canvas>
+      <div id="overlay" class="overlay">Оберіть прошивку й натисніть «Запустити»</div>
+    </div>
+    <div class="actions">
+      <button data-button="c">C</button>
+      <button data-button="d">D</button>
+      <button data-button="a">A</button>
+      <button data-button="b">B</button>
+    </div>
+    <div class="system">
+      <button data-button="select">Select</button>
+      <button data-button="start">Start</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="row">
+      <button id="run" class="primary" disabled>Запустити</button>
+      <button id="pause" disabled>Пауза</button>
+      <button id="reset" disabled>Перезапуск</button>
+      <button id="stop" disabled>Зупинити й зберегти</button>
+    </div>
+
+    <fieldset id="setup">
+      <legend>Профіль</legend>
+      <div class="row">
+        <button id="latest" class="primary">Завантажити останню KeiraOS</button>
+        <select id="latest-language" aria-label="Мова KeiraOS">
+          <option value="LANG_UK">українською</option>
+          <option value="LANG_EN">англійською</option>
+        </select>
+      </div>
+      <label class="file">…або власна прошивка (.bin, з таблицею розділів)
+        <input id="firmware" type="file" accept=".bin">
+      </label>
+      <p id="firmware-name" class="hint">Прошивку ще не обрано.</p>
+      <label class="file">Застосунок (.bin) — встановлюється в новий сеанс
+        <input id="app" type="file" accept=".bin">
+      </label>
+      <label class="file">Додати файли на SD-карту (тека)
+        <input id="sd" type="file" webkitdirectory multiple>
+      </label>
+      <p id="sd-summary" class="hint"></p>
+      <div class="row">
+        <button id="sd-export">Завантажити SD як ZIP</button>
+        <button id="sd-clear">Очистити SD</button>
+        <button id="new-session">Новий сеанс</button>
+      </div>
+      <label>Потоки процесора
+        <select id="threads">
+          <option value="multi">2 — по ядру на потік (швидше)</option>
+          <option value="single">1 — обидва ядра по черзі</option>
+        </select>
+      </label>
+    </fieldset>
+
+    <p class="hint">Клавіші: стрілки, Z/X/C/V — A/B/C/D, Tab — Select, Enter — Start; P — пауза, F5 — перезапуск.
+      Прошивка, стан флеш-пам'яті й SD зберігаються в цьому браузері; зміни на SD записуються під час «Зупинити й зберегти».
+      Wi-Fi у браузері недоступний.</p>
+
+    <details>
+      <summary>UART</summary>
+      <pre id="uart"></pre>
+    </details>
+  </section>
+</main>
+</body>
+</html>

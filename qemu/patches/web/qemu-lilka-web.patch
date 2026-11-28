@@ -1,0 +1,329 @@
+diff --git a/hw/xtensa/esp32s3.c b/hw/xtensa/esp32s3.c
+index 9962493..eac1847 100644
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -272,6 +272,24 @@ static void esp32s3_apply_cpu_stall(CPUState *cpu, run_on_cpu_data data)
+     xtensa_runstall(cpu_env(cpu), data.host_int != 0);
+ }
+ 
++/* Runs on the APP CPU between TBs, so it needs no CPU_INTERRUPT_HALT (one
++ * still pending after the release would halt the core again).
++ */
++static void esp32s3_apply_app_cpu_wait(CPUState *cpu, run_on_cpu_data data)
++{
++    bool wait = data.host_int != 0;
++    cpu_env(cpu)->runstall = wait;
++    cpu->halted = wait;
++}
++
++/* Queued in FIFO order, so a release always follows the stall before it. */
++static void esp32s3_app_cpu_wait(void *opaque, bool wait)
++{
++    Esp32s3SocState *s = ESP32S3_SOC(opaque);
++    async_run_on_cpu(CPU(&s->cpu[1]), esp32s3_apply_app_cpu_wait,
++                     RUN_ON_CPU_HOST_INT(wait));
++}
++
+ static void esp32s3_cpu_stall(void* opaque, int n, int level)
+ {
+     Esp32s3SocState *s = ESP32S3_SOC(opaque);
+@@ -775,6 +793,10 @@ static void esp32s3_machine_init(MachineState *machine)
+     {
+         ss->clock.peripheral_reset = esp32s3_peripheral_reset;
+         ss->clock.peripheral_reset_opaque = ss;
++        if (ESP32S3_CPU_COUNT > 1) {
++            ss->clock.app_cpu_wait = esp32s3_app_cpu_wait;
++            ss->clock.app_cpu_wait_opaque = ss;
++        }
+         sysbus_realize(SYS_BUS_DEVICE(&ss->clock), &error_fatal);
+         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->clock), 0);
+         memory_region_add_subregion_overlap(sys_mem, DR_REG_SYSTEM_BASE, mr, 0);
+diff --git a/hw/xtensa/esp32s3_clk.c b/hw/xtensa/esp32s3_clk.c
+index fe5329d..1c37af1 100644
+--- a/hw/xtensa/esp32s3_clk.c
++++ b/hw/xtensa/esp32s3_clk.c
+@@ -14,6 +14,8 @@
+ #include "qapi/error.h"
+ #include "qemu/error-report.h"
+ #include "hw/hw.h"
++#include "hw/core/cpu.h"
++#include "cpu.h"
+ #include "hw/sysbus.h"
+ #include "hw/irq.h"
+ #include "hw/qdev-properties.h"
+@@ -46,6 +48,12 @@ static uint32_t esp32s3_clock_get_ext_dev_enc_dec_ctrl(ESP32S3ClockState *s)
+     return s->sys_ext_dev_enc_dec_ctrl;
+ }
+ 
++/* Only the ROM's own wait parks the core, never a read by the app. */
++static bool esp32s3_clock_in_rom(uint32_t pc)
++{
++    return pc >= 0x40000000 && pc < 0x40060000;
++}
++
+ static uint64_t esp32s3_clock_read(void *opaque, hwaddr addr, unsigned int size)
+ {
+     ESP32S3ClockState *s = ESP32S3_CLOCK(opaque);
+@@ -58,6 +66,15 @@ static uint64_t esp32s3_clock_read(void *opaque, hwaddr addr, unsigned int size)
+             break;
+         case A_SYSTEM_CORE_1_CONTROL_1_REG:
+                 r = s->app_cpu_addr;
++            /* The APP CPU's ROM polls this register until the app gives it
++             * a boot address; the chip keeps that core stalled until the app
++             * starts it. Park it instead of letting every poll take the BQL
++             * from the PRO CPU loading the app.
++             */
++            if (!r && s->app_cpu_wait && current_cpu && current_cpu->cpu_index == 1 &&
++                esp32s3_clock_in_rom(cpu_env(current_cpu)->pc)) {
++                s->app_cpu_wait(s->app_cpu_wait_opaque, true);
++            }
+             break;
+         case A_SYSTEM_CPU_PER_CONF:
+             r = s->cpuperconf;
+@@ -100,6 +117,9 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
+         }
+         case A_SYSTEM_CORE_1_CONTROL_1_REG:
+                 s->app_cpu_addr = (uint32_t)value;
++            if (value && s->app_cpu_wait) {
++                s->app_cpu_wait(s->app_cpu_wait_opaque, false);
++            }
+             break;
+         case A_SYSTEM_CPU_INTR_FROM_CPU_0:
+         case A_SYSTEM_CPU_INTR_FROM_CPU_1:
+diff --git a/hw/xtensa/lilka_board_probe.c b/hw/xtensa/lilka_board_probe.c
+index 7631d96..b8a1f96 100644
+--- a/hw/xtensa/lilka_board_probe.c
++++ b/hw/xtensa/lilka_board_probe.c
+@@ -312,9 +312,23 @@ static const MemoryRegionOps lilka_ops = {
+     .impl = { .min_access_size = 1, .max_access_size = 4 },
+ };
+ /* The host control clock keeps running while the guest virtual clock pauses. */
++#ifdef __EMSCRIPTEN__
++uint32_t lilka_web_take_request(void);
++#endif
+ static void lilka_live_control(void *opaque)
+ {
+     assert(bql_locked());
++#ifdef __EMSCRIPTEN__
++    /* The page cannot take the BQL from the browser thread; it leaves a request. */
++    switch (lilka_web_take_request()) {
++    case 1:
++        qemu_system_reset_request(SHUTDOWN_CAUSE_HOST_QMP_SYSTEM_RESET);
++        break;
++    case 2:
++        qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_QMP_QUIT);
++        break;
++    }
++#endif
+     bool wants_run = bridge.wants_run(bridge.board) != 0;
+     if (!wants_run && runstate_is_running()) {
+         vm_stop(RUN_STATE_PAUSED);
+@@ -426,6 +440,23 @@ static void lilka_finish(void)
+     bridge.finish(bridge.board);
+     bridge.board = NULL;
+ }
++#ifdef __EMSCRIPTEN__
++/* Rust bridge exports (crates/lilka-qemu-bridge), linked statically. wasm checks
++ * every indirect call's exact signature, so these must match the bridge fields. */
++LilkaBridge *lilka_board_create(void *, RamRead, RamWrite);
++uint32_t lilka_board_read(LilkaBridge *, uint32_t, uint8_t, uint64_t);
++void lilka_board_write(LilkaBridge *, uint32_t, uint8_t, uint32_t, uint64_t);
++void lilka_board_tick(LilkaBridge *, uint64_t);
++void lilka_board_reset(LilkaBridge *, uint64_t);
++void lilka_board_peripheral_reset(LilkaBridge *, uint32_t, uint32_t, uint64_t);
++uint64_t lilka_board_next_event(LilkaBridge *, uint64_t);
++uint32_t lilka_board_audio_irq_pending(const LilkaBridge *);
++uint64_t lilka_board_irq(LilkaBridge *, uint32_t);
++void lilka_board_finish(LilkaBridge *);
++int lilka_board_spi_sync(LilkaBridge *, uint32_t, uint32_t *, uint32_t);
++uint32_t lilka_board_wants_run(LilkaBridge *);
++void lilka_board_live_status(LilkaBridge *, uint32_t);
++#endif
+ void lilka_qemu_board_init(MemoryRegion *memory, DeviceState *interrupts);
+ void lilka_qemu_board_init(MemoryRegion *memory, DeviceState *interrupts)
+ {
+@@ -433,30 +464,44 @@ void lilka_qemu_board_init(MemoryRegion *memory, DeviceState *interrupts)
+     if (!path) {
+         return;
+     }
++#ifdef __EMSCRIPTEN__
++    /* The browser build links the Rust bridge into this wasm module. */
++    (void)path;
++#define LOAD(field, symbol) (bridge.field = symbol)
++#else
+     bridge.library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+     if (!bridge.library) {
+         error_report("Lilka bridge: %s", dlerror());
+         exit(1);
+     }
+ #define LOAD(field, symbol) do { \
+-    bridge.field = dlsym(bridge.library, symbol); \
+-    if (!bridge.field) { error_report("Missing Lilka symbol %s", symbol); exit(1); } \
++    bridge.field = dlsym(bridge.library, #symbol); \
++    if (!bridge.field) { error_report("Missing Lilka symbol %s", #symbol); exit(1); } \
+ } while (0)
+-    LOAD(read, "lilka_board_read");
+-    LOAD(write, "lilka_board_write");
+-    LOAD(tick, "lilka_board_tick");
+-    LOAD(reset, "lilka_board_reset");
+-    LOAD(peripheral_reset, "lilka_board_peripheral_reset");
+-    LOAD(next_event, "lilka_board_next_event");
++#endif
++    LOAD(read, lilka_board_read);
++    LOAD(write, lilka_board_write);
++    LOAD(tick, lilka_board_tick);
++    LOAD(reset, lilka_board_reset);
++    LOAD(peripheral_reset, lilka_board_peripheral_reset);
++    LOAD(next_event, lilka_board_next_event);
++#ifdef __EMSCRIPTEN__
++    bridge.audio_irq_pending = lilka_board_audio_irq_pending;
++#else
+     bridge.audio_irq_pending = dlsym(bridge.library, "lilka_board_audio_irq_pending");
+-    LOAD(irq_bits, "lilka_board_irq");
+-    LOAD(finish, "lilka_board_finish");
+-    LOAD(spi_sync, "lilka_board_spi_sync");
+-    LOAD(wants_run, "lilka_board_wants_run");
+-    LOAD(live_status, "lilka_board_live_status");
++#endif
++    LOAD(irq_bits, lilka_board_irq);
++    LOAD(finish, lilka_board_finish);
++    LOAD(spi_sync, lilka_board_spi_sync);
++    LOAD(wants_run, lilka_board_wants_run);
++    LOAD(live_status, lilka_board_live_status);
+ #undef LOAD
++#ifdef __EMSCRIPTEN__
++    LilkaBridge *(*create)(void *, RamRead, RamWrite) = lilka_board_create;
++#else
+     LilkaBridge *(*create)(void *, RamRead, RamWrite) =
+         dlsym(bridge.library, "lilka_board_create");
++#endif
+     if (!create || !(bridge.board = create(NULL, lilka_ram_read, lilka_ram_write))) {
+         error_report("Cannot initialize Lilka board");
+         exit(1);
+@@ -507,7 +552,9 @@ void lilka_qemu_board_init(MemoryRegion *memory, DeviceState *interrupts)
+                                   (intptr_t)offsetof(XtensaCPU, env),
+         };
+     }
++#ifndef __EMSCRIPTEN__
+     bridge.profile_gate = dlsym(RTLD_DEFAULT, "lilka_profile_gate");
++#endif
+     bridge.clockless_spi = g_getenv("LILKA_QEMU_CLOCKLESS_SPI") != NULL;
+     if (bridge.clockless_spi) {
+         lilka_tcg_clockless_store = lilka_clockless_store;
+diff --git a/hw/xtensa/pic_cpu.c b/hw/xtensa/pic_cpu.c
+index 8cef88c..3c809e3 100644
+--- a/hw/xtensa/pic_cpu.c
++++ b/hw/xtensa/pic_cpu.c
+@@ -35,6 +35,8 @@
+ void check_interrupts(CPUXtensaState *env)
+ {
+     CPUState *cs = env_cpu(env);
++    /* Pairs with the lockless check in HELPER(check_interrupts). */
++    smp_mb();
+     int minlevel = xtensa_get_cintlevel(env);
+     uint32_t int_set_enabled = env->sregs[INTSET] &
+         (env->sregs[INTENABLE] | env->config->inttype_mask[INTTYPE_NMI]);
+diff --git a/include/hw/xtensa/esp32s3_clk.h b/include/hw/xtensa/esp32s3_clk.h
+index 87729c0..3fb9311 100644
+--- a/include/hw/xtensa/esp32s3_clk.h
++++ b/include/hw/xtensa/esp32s3_clk.h
+@@ -51,6 +51,9 @@ typedef struct ESP32S3ClockState {
+     uint32_t periph_reset[2];
+     void (*peripheral_reset)(void *opaque, unsigned bank, uint32_t mask);
+     void *peripheral_reset_opaque;
++    /* Stalls (true) or releases (false) the APP CPU. */
++    void (*app_cpu_wait)(void *opaque, bool wait);
++    void *app_cpu_wait_opaque;
+ 
+ 
+     /* IRQs for crosscore interrupts */
+diff --git a/meson.build b/meson.build
+index 1a01aae..c8c5278 100644
+--- a/meson.build
++++ b/meson.build
+@@ -4303,7 +4303,16 @@ foreach target : target_dirs
+     lilka_cflags = []
+     lilka_link_depends = []
+     if get_option('lilka_frontend') != '' and target == 'xtensa-softmmu'
+-      if host_os == 'darwin'
++      if host_os == 'emscripten'
++        # One wasm module: QEMU, the Rust session code and the board bridge.
++        # The page drives it through these exports and the shared live buffer.
++        lilka_link = [get_option('lilka_frontend'), '-lidbfs.js',
++                      '-sINVOKE_RUN=0', '-sEXIT_RUNTIME=0', '-sMODULARIZE=1',
++                      '-sEXPORT_NAME=createLilkaEmulator', '-sPTHREAD_POOL_SIZE=8',
++                      '-sSTACK_SIZE=4MB', '-sDEFAULT_PTHREAD_STACK_SIZE=4MB', '--profiling-funcs',
++                      '-sEXPORTED_FUNCTIONS=_main,_lilka_web_live,_lilka_web_layout,_lilka_web_request',
++                      '-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,callMain,UTF8ToString,HEAPU8,addFunction,removeFunction,TTY']
++      elif host_os == 'darwin'
+         lilka_link = [get_option('lilka_frontend'), '-Wl,-export_dynamic', '-lobjc', '-liconv', '-lm']
+         foreach framework : ['AppKit', 'ApplicationServices', 'Carbon', 'CoreFoundation', 'CoreGraphics', 'CoreVideo', 'Foundation', 'QuartzCore']
+           lilka_link += ['-framework', framework]
+diff --git a/system/main.c b/system/main.c
+index 19c346f..fd8d71e 100644
+--- a/system/main.c
++++ b/system/main.c
+@@ -78,9 +78,16 @@ void lilka_cpu_reset(void)
+ }
+ #endif
+ 
++#if defined(LILKA_EMBEDDED_DESKTOP) && defined(__EMSCRIPTEN__)
++extern int lilka_web_main(int argc, char **argv);
++#endif
++
+ int main(int argc, char **argv)
+ {
+-#ifdef LILKA_EMBEDDED_DESKTOP
++#if defined(LILKA_EMBEDDED_DESKTOP) && defined(__EMSCRIPTEN__)
++    /* Browser: src/web.rs prepares the session, then calls lilka_cpu_run. */
++    return lilka_web_main(argc, argv);
++#elif defined(LILKA_EMBEDDED_DESKTOP)
+     if (argc <= 1 || strcmp(argv[1], "--cpu-only") != 0) {
+         return lilka_desktop_main();
+     }
+diff --git a/target/xtensa/exc_helper.c b/target/xtensa/exc_helper.c
+index ca629f0..30450a6 100644
+--- a/target/xtensa/exc_helper.c
++++ b/target/xtensa/exc_helper.c
+@@ -118,8 +118,41 @@ void HELPER(waiti)(CPUXtensaState *env, uint32_t pc, uint32_t intlevel)
+     HELPER(exception)(env, EXCP_HLT);
+ }
+ 
++/* Whether check_interrupts() would raise an interrupt now. */
++static bool xtensa_irq_deliverable(CPUXtensaState *env)
++{
++    int minlevel = xtensa_get_cintlevel(env);
++    uint32_t int_set_enabled = qatomic_read(&env->sregs[INTSET]) &
++        (env->sregs[INTENABLE] | env->config->inttype_mask[INTTYPE_NMI]);
++
++    if (minlevel >= env->config->nmi_level) {
++        minlevel = env->config->nmi_level - 1;
++    }
++    for (int level = env->config->nlevel; level > minlevel; --level) {
++        if (env->config->level_mask[level] & int_set_enabled) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ void HELPER(check_interrupts)(CPUXtensaState *env)
+ {
++    /* Every critical section enters and leaves through here (RSIL, WSR.PS),
++     * and almost always nothing is pending: then check_interrupts() would
++     * change nothing, so skip the BQL both vCPUs otherwise fight over. A
++     * device raising an IRQ meanwhile sets INTSET and then runs its own
++     * check_interrupts() under the BQL; with a barrier on both sides
++     * (there and here, after this vCPU's PS/INTENABLE store) at least one
++     * of the two sees the other's write. A stale CPU_INTERRUPT_HARD is
++     * re-checked against the current level when it is taken.
++     */
++    smp_mb();
++    if (!qatomic_read(&env->pending_irq_level) &&
++        !(qatomic_read(&env_cpu(env)->interrupt_request) & CPU_INTERRUPT_HARD) &&
++        !xtensa_irq_deliverable(env)) {
++        return;
++    }
+     bql_lock();
+     check_interrupts(env);
+     bql_unlock();
