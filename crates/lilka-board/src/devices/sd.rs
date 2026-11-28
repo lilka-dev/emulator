@@ -317,7 +317,9 @@ impl SdCard {
         }
         #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
         if let Some(folder) = &mut self.folder {
-            return match folder.get_mut().unwrap().read_sector(sector as u32) {
+            let folder = folder.get_mut().unwrap();
+            folder.poll_changes(sector as u32);
+            return match folder.read_sector(sector as u32) {
                 Ok(bytes) => Some(bytes),
                 Err(error) => {
                     self.io_error = Some(error.to_string());

@@ -27,6 +27,18 @@ impl FolderCard {
         if u64::from(sector) >= CAPACITY / SECTOR as u64 {
             return Err(io::Error::other("SD sector outside volume"));
         }
+        self.last_write = Some(std::time::Instant::now());
+        if let Some(watcher) = &self.watcher {
+            watcher.written();
+        }
+        let result = self.write_guest_sector(sector, bytes);
+        if let Some(watcher) = &self.watcher {
+            watcher.written();
+        }
+        result
+    }
+
+    fn write_guest_sector(&mut self, sector: u32, bytes: &[u8; SECTOR]) -> io::Result<()> {
         let directory = self.catalog.sectors.contains(&sector);
         {
             let mut state = self.state.lock().unwrap();

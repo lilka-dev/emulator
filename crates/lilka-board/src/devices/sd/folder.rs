@@ -11,20 +11,23 @@ const PARTITION: u64 = 2048;
 const CAPACITY: u64 = 512 * 1024 * 1024;
 
 mod catalog;
+mod refresh;
 mod writeback;
 
+#[derive(Clone)]
 struct Extent {
     path: PathBuf,
     offset: u64,
     sectors: u32,
 }
 
+#[derive(Clone)]
 struct Import {
     path: PathBuf,
     offset: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct State {
     metadata: BTreeMap<u32, Box<[u8; SECTOR]>>,
     pending: BTreeMap<u32, Box<[u8; SECTOR]>>,
@@ -169,6 +172,9 @@ pub struct FolderCard {
     catalog: catalog::Catalog,
     metadata_dirty: bool,
     dirty_files: BTreeSet<PathBuf>,
+    watcher: Option<refresh::Watcher>,
+    host_update: Option<refresh::Update>,
+    last_write: Option<std::time::Instant>,
 }
 
 impl FolderCard {
@@ -242,12 +248,19 @@ impl FolderCard {
         }
         filesystem.unmount()?;
         let catalog = catalog::read(&state.lock().unwrap())?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let watcher = Some(refresh::Watcher::start(root.clone())?);
+        #[cfg(target_arch = "wasm32")]
+        let watcher = None;
         Ok(Self {
             state,
             root,
             catalog,
             metadata_dirty: false,
             dirty_files: BTreeSet::new(),
+            watcher,
+            host_update: None,
+            last_write: None,
         })
     }
 
