@@ -1,5 +1,6 @@
 mod audio;
 mod launcher;
+mod terminal;
 use anyhow::{Context, Result, ensure};
 use audio::AudioWorker;
 use iced::{
@@ -26,10 +27,12 @@ enum Message {
     Tap(usize),
     Pause,
     Reset,
-    Close,
+    Close(window::Id),
+    Terminal(terminal::Message),
 }
 struct App {
     session: Session,
+    terminal: terminal::Terminal,
     audio: Option<AudioOutput>,
     worker: Option<AudioWorker>,
     frame: image::Handle,
@@ -56,6 +59,7 @@ impl App {
             audio.as_ref().map(AudioOutput::sink),
         ));
         Self {
+            terminal: terminal::Terminal::new(),
             session,
             audio,
             worker,
@@ -77,8 +81,16 @@ impl App {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             iced::time::every(Duration::from_nanos(1_000_000_000 / 30)).map(|_| Message::Tick),
-            iced::event::listen_with(|event, _, _| Some(Message::Event(event))),
-            window::close_requests().map(|_| Message::Close),
+            iced::event::listen_with(|event, status, _| {
+                if matches!(event, Event::Keyboard(keyboard::Event::KeyPressed { .. }))
+                    && status == iced::event::Status::Captured
+                {
+                    None
+                } else {
+                    Some(Message::Event(event))
+                }
+            }),
+            window::close_requests().map(Message::Close),
             if self.window_ready {
                 Subscription::none()
             } else {
@@ -98,7 +110,14 @@ impl App {
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Close => return iced::exit(),
+            Message::Close(id) => {
+                if self.terminal.window == Some(id) {
+                    self.terminal.window = None;
+                    return window::close(id);
+                }
+                return iced::exit();
+            }
+            Message::Terminal(message) => return self.terminal.update(message),
             Message::Pause => {
                 self.paused = !self.paused;
                 self.session.pause(self.paused);
@@ -165,8 +184,14 @@ impl App {
                 self.held.fill(false);
                 self.pulse.fill(None);
             }
-            Message::Ready => self.window_ready = true,
+            Message::Ready => {
+                self.window_ready = true;
+                if self.terminal.mode == lilka_emulator::preferences::TerminalMode::Window {
+                    return self.terminal.update(terminal::Message::Open);
+                }
+            }
             Message::Tick => {
+                self.terminal.tick(&self.session);
                 if self.window_ready && !self.paused && !self.session.ipc.wants_running() {
                     self.session.pause(false);
                 }
@@ -205,7 +230,10 @@ impl App {
         self.sync_keys();
         Task::none()
     }
-    fn view(&self, _: window::Id) -> Element<'_, Message> {
+    fn view(&self, id: window::Id) -> Element<'_, Message> {
+        if self.terminal.window == Some(id) {
+            return self.terminal.view();
+        }
         let stats = self.session.ipc.stats();
         let lost = stats.dropped_frames
             + self
@@ -247,7 +275,7 @@ impl App {
                     .on_press(Message::Tap(i)),
             );
         }
-        column![
+        let mut layout = column![
             container(
                 image(self.frame.clone())
                     .width(Length::Fill)
@@ -272,8 +300,11 @@ impl App {
             )
             .padding([10, 12])
         ]
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill);
+        if self.terminal.mode != lilka_emulator::preferences::TerminalMode::Window {
+            layout = layout.push(self.terminal.view());
+        }
+        layout.into()
     }
     fn toolbar(&self) -> iced::widget::Row<'_, Message> {
         row![
@@ -283,12 +314,16 @@ impl App {
                 "Пауза"
             })
             .on_press(Message::Pause),
-            button("Перезапуск").on_press(Message::Reset)
+            button("Перезапуск").on_press(Message::Reset),
+            button("UART").on_press(Message::Terminal(terminal::Message::Open))
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
     }
     fn standalone_view(&self, window: window::Id) -> Element<'_, Message> {
+        if self.terminal.window == Some(window) {
+            return self.terminal.view();
+        }
         column![
             container(self.toolbar()).padding([10, 12]),
             self.view(window)
@@ -475,7 +510,13 @@ pub fn run() -> Result<()> {
         App::update,
         App::standalone_view,
     )
-    .title(|_: &App, _| "Lilka".to_string())
+    .title(|app: &App, id| {
+        if app.terminal.window == Some(id) {
+            "Lilka · UART".to_owned()
+        } else {
+            "Lilka".to_owned()
+        }
+    })
     .theme(theme())
     .default_font(iced::Font::with_name("Fira Sans"))
     .subscription(App::subscription)

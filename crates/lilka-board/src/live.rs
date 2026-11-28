@@ -1,14 +1,14 @@
 use anyhow::{Result, ensure};
 #[cfg(not(target_arch = "wasm32"))]
 use memmap2::{MmapMut as Mapping, MmapOptions};
+#[cfg(target_arch = "wasm32")]
+use shared::Mapping;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::OpenOptions;
 use std::{
     path::Path,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
-#[cfg(target_arch = "wasm32")]
-use shared::Mapping;
 
 pub const WIDTH: usize = super::devices::display::WIDTH;
 pub const HEIGHT: usize = super::devices::display::HEIGHT;
@@ -17,7 +17,11 @@ pub const INPUT_MASK: u64 = (1u64 << 49) - 1;
 const MAGIC: u32 = 0x4c49_4c32;
 const HEADER: usize = 128;
 const AUDIO: usize = HEADER + WIDTH * HEIGHT * 4;
-pub const SIZE: usize = AUDIO + AUDIO_CAPACITY * 4;
+const UART_HEAD: usize = AUDIO + AUDIO_CAPACITY * 4;
+const UART_TAIL: usize = UART_HEAD + 4;
+const UART_RX: usize = UART_TAIL + 4;
+pub const UART_CAPACITY: usize = 16_384;
+pub const SIZE: usize = UART_RX + UART_CAPACITY * 4;
 const HEAD: usize = 8;
 const TAIL: usize = 16;
 const DROPPED: usize = 24;
@@ -40,6 +44,10 @@ pub const LAYOUT: &[(&str, usize)] = &[
     ("width", WIDTH),
     ("height", HEIGHT),
     ("pixels", HEADER),
+    ("uart_head", UART_HEAD),
+    ("uart_tail", UART_TAIL),
+    ("uart_rx", UART_RX),
+    ("uart_capacity", UART_CAPACITY),
     ("audio", AUDIO),
     ("audio_capacity", AUDIO_CAPACITY),
     ("audio_head", HEAD),
@@ -109,7 +117,7 @@ impl Ipc {
         Mapping::get().as_ptr()
     }
     fn initialize(&self) {
-        self.u32(4).store(1, Ordering::Relaxed);
+        self.u32(4).store(2, Ordering::Relaxed);
         self.u64(INPUT).store(INPUT_MASK, Ordering::Relaxed);
         self.u32(RUN).store(1, Ordering::Relaxed);
         self.u32(0).store(MAGIC, Ordering::Release);
@@ -138,7 +146,7 @@ impl Ipc {
         };
         ensure!(
             this.u32(0).load(Ordering::Acquire) == MAGIC
-                && this.u32(4).load(Ordering::Relaxed) == 1,
+                && this.u32(4).load(Ordering::Relaxed) == 2,
             "Incompatible live mapping"
         );
         Ok(this)
@@ -153,6 +161,37 @@ impl Ipc {
         assert!(offset.is_multiple_of(8) && offset + 8 <= HEADER);
         // SAFETY: Same alignment/lifetime invariant as u32, within the header.
         unsafe { &*self.map.as_ptr().add(offset).cast::<AtomicU64>() }
+    }
+    /// Single producer (frontend), single consumer (QEMU under the BQL).
+    pub fn send_uart(&self, bytes: &[u8]) -> usize {
+        let head = self.u32(UART_HEAD).load(Ordering::Relaxed);
+        let tail = self.u32(UART_TAIL).load(Ordering::Acquire);
+        let count = bytes
+            .len()
+            .min(UART_CAPACITY.saturating_sub(head.wrapping_sub(tail) as usize));
+        for (i, byte) in bytes[..count].iter().enumerate() {
+            self.u32(UART_RX + (head.wrapping_add(i as u32) as usize % UART_CAPACITY) * 4)
+                .store(u32::from(*byte), Ordering::Relaxed);
+        }
+        self.u32(UART_HEAD)
+            .store(head.wrapping_add(count as u32), Ordering::Release);
+        count
+    }
+    pub fn receive_uart(&self, bytes: &mut [u8]) -> usize {
+        let tail = self.u32(UART_TAIL).load(Ordering::Relaxed);
+        let head = self.u32(UART_HEAD).load(Ordering::Acquire);
+        let count = bytes
+            .len()
+            .min(head.wrapping_sub(tail) as usize)
+            .min(UART_CAPACITY);
+        for (i, byte) in bytes[..count].iter_mut().enumerate() {
+            *byte = self
+                .u32(UART_RX + (tail.wrapping_add(i as u32) as usize % UART_CAPACITY) * 4)
+                .load(Ordering::Relaxed) as u8;
+        }
+        self.u32(UART_TAIL)
+            .store(tail.wrapping_add(count as u32), Ordering::Release);
+        count
     }
     pub fn push_audio(&self, frames: &[[i16; 2]]) -> usize {
         let head = self.u64(HEAD).load(Ordering::Relaxed);
@@ -320,6 +359,56 @@ mod shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uart_backpressure_wrap_and_counter_rollover() -> Result<()> {
+        let path = path();
+        let sender = Ipc::create(&path)?;
+        let receiver = Ipc::open(&path)?;
+        sender.u32(UART_HEAD).store(u32::MAX - 7, Ordering::Relaxed);
+        sender.u32(UART_TAIL).store(u32::MAX - 7, Ordering::Relaxed);
+        let data: Vec<_> = (0..UART_CAPACITY + 100).map(|i| (i % 251) as u8).collect();
+        assert_eq!(sender.send_uart(&data), UART_CAPACITY);
+        assert_eq!(sender.send_uart(b"blocked"), 0);
+        let mut output = vec![0; 97];
+        assert_eq!(receiver.receive_uart(&mut output), 97);
+        assert_eq!(&output, &data[..97]);
+        assert_eq!(sender.send_uart(&data[UART_CAPACITY..]), 97);
+        output.resize(UART_CAPACITY, 0);
+        assert_eq!(receiver.receive_uart(&mut output), UART_CAPACITY);
+        assert_eq!(&output, &data[97..UART_CAPACITY + 97]);
+        assert_eq!(receiver.receive_uart(&mut output), 0);
+        drop(sender);
+        drop(receiver);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+    #[test]
+    fn uart_concurrent_peers_preserve_every_byte() -> Result<()> {
+        let path = path();
+        let sender = Ipc::create(&path)?;
+        let receiver = Ipc::open(&path)?;
+        let data: Vec<_> = (0..200_000).map(|i| (i % 251) as u8).collect();
+        let expected = data.clone();
+        let producer = std::thread::spawn(move || {
+            let mut at = 0;
+            while at < data.len() {
+                at += sender.send_uart(&data[at..]);
+                std::thread::yield_now();
+            }
+        });
+        let mut output = Vec::new();
+        let mut buffer = [0; 127];
+        while output.len() < expected.len() {
+            let n = receiver.receive_uart(&mut buffer);
+            output.extend_from_slice(&buffer[..n]);
+            std::thread::yield_now();
+        }
+        producer.join().unwrap();
+        assert_eq!(output, expected);
+        drop(receiver);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
     #[test]
     fn lcd_counters_cross_mapping_without_changing_controls() -> Result<()> {
         let path = path();

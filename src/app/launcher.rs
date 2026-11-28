@@ -7,7 +7,7 @@ use iced::{
 };
 use lilka_emulator::{
     controls::{BUTTONS, key_name},
-    preferences::{Settings, user_dir},
+    preferences::{Settings, TerminalMode, user_dir},
     profiles::Profiles,
     storage::{SdMode, atomic_write},
 };
@@ -29,6 +29,7 @@ enum Message {
     Start,
     Home,
     Settings,
+    TerminalMode(TerminalMode),
     Bind(usize),
     Defaults,
     Event(Event),
@@ -44,6 +45,7 @@ struct Desktop {
     binding: Option<usize>,
     pause_before_settings: bool,
     keys: [String; 10],
+    terminal_mode: TerminalMode,
 }
 
 impl Desktop {
@@ -98,6 +100,19 @@ impl Desktop {
     fn change(&mut self, message: Message) -> Result<Task<Message>> {
         match message {
             Message::Close => return Ok(iced::exit()),
+            Message::TerminalMode(mode) => {
+                self.terminal_mode = mode;
+                if let Some(app) = &mut self.running {
+                    return Ok(app
+                        .update(super::Message::Terminal(super::terminal::Message::Mode(
+                            mode,
+                        )))
+                        .map(Message::Runtime));
+                }
+                let mut settings = Settings::load();
+                settings.terminal = mode;
+                settings.save()?;
+            }
             Message::Name(value) => self.name = value,
             Message::Select(name) => {
                 self.profiles.select(&name)?;
@@ -221,7 +236,6 @@ impl Desktop {
                 self.keys = Settings::default().keys;
                 self.save_keys()?;
             }
-            Message::Runtime(super::Message::Close) => return Ok(iced::exit()),
             Message::Runtime(super::Message::Event(event)) | Message::Event(event)
                 if self.settings =>
             {
@@ -279,6 +293,11 @@ impl Desktop {
         }
     }
     fn view(&self, window: window::Id) -> Element<'_, Message> {
+        if let Some(app) = &self.running
+            && app.terminal.window == Some(window)
+        {
+            return app.view(window).map(Message::Runtime);
+        }
         let mut toolbar = row![
             text("Lilka").size(20),
             button("Профілі").on_press(Message::Home),
@@ -299,6 +318,16 @@ impl Desktop {
         }
         let content: Element<'_, Message> = if self.settings {
             let mut controls = column![
+                text("UART-термінал").size(23),
+                iced::widget::pick_list(
+                    TerminalMode::ALL,
+                    Some(
+                        self.running
+                            .as_ref()
+                            .map_or(self.terminal_mode, |app| app.terminal.mode)
+                    ),
+                    Message::TerminalMode
+                ),
                 text("Керування").size(23),
                 text("Натисніть кнопку, а потім потрібну клавішу.").width(Length::Fill),
                 text("P — пауза, F5 — перезапуск.")
@@ -443,6 +472,7 @@ pub fn run(session: Option<super::Session>) -> Result<()> {
                     binding: None,
                     pause_before_settings: false,
                     keys,
+                    terminal_mode: Settings::load().terminal,
                 },
                 open.map(|_| {
                     Message::Event(Event::Window(window::Event::RedrawRequested(
@@ -454,7 +484,17 @@ pub fn run(session: Option<super::Session>) -> Result<()> {
         Desktop::update,
         Desktop::view,
     )
-    .title(|_: &Desktop, _| "Lilka".to_owned())
+    .title(|app: &Desktop, id| {
+        if app
+            .running
+            .as_ref()
+            .is_some_and(|a| a.terminal.window == Some(id))
+        {
+            "Lilka · UART".to_owned()
+        } else {
+            "Lilka".to_owned()
+        }
+    })
     .theme(super::theme())
     .default_font(iced::Font::with_name("Fira Sans"))
     .subscription(Desktop::subscription)

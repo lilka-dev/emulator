@@ -45,9 +45,28 @@ impl Scale {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TerminalMode {
+    #[default]
+    #[serde(alias = "External")]
+    Embedded,
+    Window,
+}
+impl TerminalMode {
+    pub const ALL: [Self; 2] = [Self::Embedded, Self::Window];
+}
+impl std::fmt::Display for TerminalMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Embedded => "Вбудований",
+            Self::Window => "Окреме вікно",
+        })
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub terminal: TerminalMode,
     pub firmware: String,
     pub state: String,
     pub sd: SdSettings,
@@ -68,6 +87,7 @@ impl Default for Settings {
             ..Default::default()
         };
         Self {
+            terminal: TerminalMode::default(),
             firmware: String::new(),
             state: user_dir().join("state").display().to_string(),
             sd,
@@ -100,5 +120,18 @@ impl Settings {
 impl std::fmt::Display for Scale {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::TerminalMode;
+
+    #[test]
+    fn old_external_mode_falls_back_to_embedded() {
+        assert_eq!(
+            serde_json::from_str::<TerminalMode>(r#""External""#).unwrap(),
+            TerminalMode::Embedded
+        );
     }
 }

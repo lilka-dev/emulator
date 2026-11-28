@@ -1,0 +1,240 @@
+--- a/hw/xtensa/lilka_board_probe.c
++++ b/hw/xtensa/lilka_board_probe.c
+@@ -16,6 +16,9 @@
+ #include "qemu/atomic.h"
+ #include "tcg/lilka-inline-io.h"
+ #include "cpu.h"
++#include "chardev/char.h"
++#include "chardev/char-fe.h"
++#include "hw/misc/esp32c3_jtag.h"
+ #include <dlfcn.h>
+ 
+ typedef struct LilkaBridge LilkaBridge;
+@@ -311,6 +314,41 @@
+     .valid = { .min_access_size = 1, .max_access_size = 4 },
+     .impl = { .min_access_size = 1, .max_access_size = 4 },
+ };
++#ifdef __EMSCRIPTEN__
++extern size_t lilka_board_uart_read(LilkaBridge *, uint8_t *, size_t);
++#endif
++static void lilka_uart_poll(void)
++{
++    static size_t (*read_uart)(LilkaBridge *, uint8_t *, size_t);
++    static bool resolved;
++    if (!resolved) {
++#ifdef __EMSCRIPTEN__
++        read_uart = lilka_board_uart_read;
++#else
++        read_uart = dlsym(bridge.library, "lilka_board_uart_read");
++#endif
++        resolved = true;
++    }
++    static ESP32C3UsbJtagState *usb;
++    if (!usb) {
++        Object *device = object_resolve_path_type("", TYPE_ESP32C3_JTAG, NULL);
++        if (device) { usb = ESP32C3_JTAG(device); }
++    }
++    bool cdc = usb && (usb->regs[0x10 / 4] & (1u << 2));
++    Chardev *chr = qemu_chr_find(cdc ? "serial2" : "serial0");
++    if (!chr || !read_uart || !runstate_is_running()) {
++        return;
++    }
++    uint8_t bytes[32];
++    int space = qemu_chr_be_can_write(chr);
++    if (space > 0) {
++        size_t count = read_uart(bridge.board, bytes, MIN(space, sizeof(bytes)));
++        if (count) {
++            qemu_chr_be_write(chr, bytes, count);
++        }
++    }
++}
++
+ /* The host control clock keeps running while the guest virtual clock pauses. */
+ static void lilka_live_control(void *opaque)
+ {
+@@ -322,6 +360,7 @@
+         vm_start();
+     }
+     bridge.live_status(bridge.board, runstate_is_running() ? 1 : 2);
++    lilka_uart_poll();
+     timer_mod(bridge.live_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 5000000);
+ }
+ 
+--- a/hw/misc/esp32c3_jtag.c
++++ b/hw/misc/esp32c3_jtag.c
+@@ -12,21 +12,89 @@
+ #include "qemu/module.h"
+ #include "qemu/error-report.h"
+ #include "hw/hw.h"
++#include "hw/qdev-properties.h"
++#include "hw/qdev-properties-system.h"
++#include "hw/irq.h"
+ #include "hw/sysbus.h"
+ #include "hw/misc/esp32c3_jtag.h"
+ 
+ 
++enum { EP1 = 0, EP1_CONF = 1, INT_RAW = 2, INT_ST = 3, INT_ENA = 4, INT_CLR = 5 };
++enum { SOF = 1u << 1, OUT_PACKET = 1u << 2, IN_EMPTY = 1u << 3 };
++
++static void cdc_update(ESP32C3UsbJtagState *s)
++{
++    s->regs[INT_RAW] = (s->regs[INT_RAW] & ~OUT_PACKET) |
++                       (fifo8_is_empty(&s->rx) ? 0 : OUT_PACKET);
++    s->regs[INT_ST] = s->regs[INT_RAW] & s->regs[INT_ENA];
++    qemu_set_irq(s->irq, s->regs[INT_ST] != 0);
++}
++static void cdc_flush(ESP32C3UsbJtagState *s)
++{
++    while (!fifo8_is_empty(&s->tx) && qemu_chr_fe_backend_open(&s->chr)) {
++        uint8_t byte = fifo8_peek(&s->tx);
++        if (qemu_chr_fe_write(&s->chr, &byte, 1) != 1) { break; }
++        fifo8_pop(&s->tx);
++    }
++    if (fifo8_is_empty(&s->tx)) { s->regs[INT_RAW] |= IN_EMPTY; }
++    cdc_update(s);
++}
++static void cdc_sof(void *opaque)
++{
++    ESP32C3UsbJtagState *s = opaque;
++    if (qemu_chr_fe_backend_open(&s->chr)) {
++        s->regs[INT_RAW] |= SOF;
++        cdc_flush(s);
++    }
++    timer_mod(&s->sof_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
++}
++static int cdc_can_receive(void *opaque)
++{
++    ESP32C3UsbJtagState *s = opaque;
++    return (s->regs[INT_ENA] & OUT_PACKET) ? fifo8_num_free(&s->rx) : 0;
++}
++static void cdc_receive(void *opaque, const uint8_t *bytes, int count)
++{
++    ESP32C3UsbJtagState *s = opaque;
++    for (int i = 0; i < count && !fifo8_is_full(&s->rx); i++) { fifo8_push(&s->rx, bytes[i]); }
++    cdc_update(s);
++}
+ static uint64_t esp32c3_jtag_read(void *opaque, hwaddr addr, unsigned int size)
+ {
+     ESP32C3UsbJtagState *s = ESP32C3_JTAG(opaque);
+-    (void) s;
+-    return 0;
++    switch (addr / 4) {
++    case EP1: {
++        uint8_t byte = fifo8_is_empty(&s->rx) ? 0 : fifo8_pop(&s->rx);
++        cdc_update(s);
++        qemu_chr_fe_accept_input(&s->chr);
++        return byte;
++    }
++    case EP1_CONF:
++        return (!fifo8_is_full(&s->tx) ? 2 : 0) | (!fifo8_is_empty(&s->rx) ? 4 : 0);
++    default:
++        return addr < sizeof(s->regs) ? s->regs[addr / 4] : 0;
++    }
+ }
+-
+ static void esp32c3_jtag_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
+ {
+     ESP32C3UsbJtagState *s = ESP32C3_JTAG(opaque);
+-    (void) s;
++    switch (addr / 4) {
++    case EP1:
++        if (!fifo8_is_full(&s->tx)) { fifo8_push(&s->tx, value); }
++        break;
++    case EP1_CONF:
++        if (value & 1) { cdc_flush(s); }
++        break;
++    case INT_CLR:
++        s->regs[INT_RAW] &= ~value;
++        break;
++    case INT_RAW: case INT_ST:
++        break;
++    default:
++        if (addr < sizeof(s->regs)) { s->regs[addr / 4] = value; }
++        break;
++    }
++    cdc_update(s);
+ }
+ 
+ static const MemoryRegionOps esp32c3_jtag_ops = {
+@@ -37,14 +105,18 @@
+ 
+ static void esp32c3_jtag_reset_hold(Object *obj, ResetType type)
+ {
+-    (void) obj;
+-    (void) type;
++    ESP32C3UsbJtagState *s = ESP32C3_JTAG(obj);
++    memset(s->regs, 0, sizeof(s->regs));
++    fifo8_reset(&s->rx); fifo8_reset(&s->tx);
++    s->regs[INT_RAW] = IN_EMPTY;
++    qemu_irq_lower(s->irq);
++    timer_mod(&s->sof_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
+ }
+ 
+ static void esp32c3_jtag_realize(DeviceState *dev, Error **errp)
+ {
+-    (void) dev;
+-    (void) errp;
++    ESP32C3UsbJtagState *s = ESP32C3_JTAG(dev);
++    qemu_chr_fe_set_handlers(&s->chr, cdc_can_receive, cdc_receive, NULL, NULL, s, NULL, true);
+ }
+ 
+ static void esp32c3_jtag_init(Object *obj)
+@@ -55,7 +127,14 @@
+     memory_region_init_io(&s->iomem, obj, &esp32c3_jtag_ops, s,
+                           TYPE_ESP32C3_JTAG, ESP32C3_JTAG_REGS_SIZE);
+     sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++    fifo8_create(&s->rx, 64); fifo8_create(&s->tx, 64);
++    timer_init_ns(&s->sof_timer, QEMU_CLOCK_VIRTUAL, cdc_sof, s);
+ }
++
++static const Property cdc_properties[] = {
++    DEFINE_PROP_CHR("chardev", ESP32C3UsbJtagState, chr),
++};
+ 
+ static void esp32c3_jtag_class_init(ObjectClass *klass, void *data)
+ {
+@@ -64,6 +143,7 @@
+ 
+     rc->phases.hold = esp32c3_jtag_reset_hold;
+     dc->realize = esp32c3_jtag_realize;
++    device_class_set_props(dc, cdc_properties);
+ }
+ 
+ static const TypeInfo esp32c3_jtag_info = {
+--- a/include/hw/misc/esp32c3_jtag.h
++++ b/include/hw/misc/esp32c3_jtag.h
+@@ -12,6 +12,9 @@
+ #include "hw/hw.h"
+ #include "hw/sysbus.h"
+ #include "hw/registerfields.h"
++#include "chardev/char-fe.h"
++#include "qemu/fifo8.h"
++#include "qemu/timer.h"
+ 
+ #define TYPE_ESP32C3_JTAG "misc.esp32c3.usb_serial_jtag"
+ #define ESP32C3_JTAG(obj) OBJECT_CHECK(ESP32C3UsbJtagState, (obj), TYPE_ESP32C3_JTAG)
+@@ -22,5 +25,10 @@
+ typedef struct ESP32C3UsbJtagState {
+     SysBusDevice parent_object;
+     MemoryRegion iomem;
++    CharBackend chr;
++    qemu_irq irq;
++    Fifo8 rx, tx;
++    QEMUTimer sof_timer;
++    uint32_t regs[ESP32C3_JTAG_REGS_SIZE / 4];
+ } ESP32C3UsbJtagState;
+ 
+--- a/hw/xtensa/esp32s3.c
++++ b/hw/xtensa/esp32s3.c
+@@ -726,7 +726,10 @@
+ 
+     /* USB Serial JTAG realization */
+     {
++        qdev_prop_set_chr(DEVICE(&ss->jtag), "chardev", serial_hd(2));
+         sysbus_realize(SYS_BUS_DEVICE(&ss->jtag), &error_fatal);
++        sysbus_connect_irq(SYS_BUS_DEVICE(&ss->jtag), 0,
++                           qdev_get_gpio_in(intmatrix_dev, ETS_USB_SERIAL_JTAG_INTR_SOURCE));
+         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->jtag), 0);
+         memory_region_add_subregion_overlap(sys_mem, DR_REG_USB_SERIAL_JTAG_BASE, mr, 0);
+     }

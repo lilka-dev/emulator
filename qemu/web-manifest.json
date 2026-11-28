@@ -49,7 +49,7 @@
     },
     {
       "file": "hw/xtensa/esp32s3.c",
-      "sha256": "4586b68457b4ca132306ae68f4365ec47b583060503e13c348fbe6f720cd586c"
+      "sha256": "42f96a33857e4c0cfdc1e8589f956d24f44a3d9b17e91ae9833e4a481fadfb6e"
     },
     {
       "file": "hw/xtensa/esp32s3_clk.c",
@@ -57,7 +57,7 @@
     },
     {
       "file": "hw/xtensa/lilka_board_probe.c",
-      "sha256": "71438721a4ed8f6d5ea0d3b4edeba3567597b78537cfa9ae60170f5b23535e5a"
+      "sha256": "e21b8c293d514acc95d8872f6c0152e503b5348d62175fa62a1e1e03aa12f2d2"
     },
     {
       "file": "hw/xtensa/pic_cpu.c",

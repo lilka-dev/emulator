@@ -547,6 +547,20 @@ pub unsafe extern "C" fn lilka_board_live_status(p: *mut Bridge, status: u32) {
         live.set_status(status);
     }
 }
+/// # Safety
+/// QEMU holds the BQL; `p` is live and `data` is writable for `capacity` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lilka_board_uart_read(
+    p: *mut Bridge,
+    data: *mut u8,
+    capacity: usize,
+) -> usize {
+    // SAFETY: QEMU owns a live bridge and supplies a writable capacity-byte buffer.
+    let b = unsafe { &*p };
+    let bytes = unsafe { std::slice::from_raw_parts_mut(data, capacity) };
+    b.live.as_ref().map_or(0, |live| live.receive_uart(bytes))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lilka_board_finish(p: *mut Bridge) {
     // SAFETY: Called once at process exit, after execution stops, before dlclose.

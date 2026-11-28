@@ -29,6 +29,16 @@ pub fn run() -> Result<()> {
     };
     let scenario = args[6].to_str().unwrap_or("");
     let seconds: f64 = args[7].to_str().unwrap_or("").parse()?;
+    let uart_payload = match scenario {
+        "uart-repl" => concat!(r#"print("UART_REPL_OK_"..tostring(6*7).."_Привіт")"#, "\r")
+            .as_bytes()
+            .to_vec(),
+        "uart-live" => ("-- UART chunk transfer check\n".repeat(250)
+            + "print(\"UART_LIVE_OK_\"..tostring(6*7))\n")
+            .into_bytes(),
+        _ => Vec::new(),
+    };
+    let mut uart_sent = 0;
     let mut events = Vec::new();
     let mut key = |ms: u64, pin: u8| {
         events.push((ms * 240000, pin, false));
@@ -36,6 +46,16 @@ pub fn run() -> Result<()> {
     };
     match scenario {
         "menu" | "reset" => {}
+        "uart-repl" | "uart-live" => {
+            for ms in [7000, 7400, 7800] {
+                key(ms, 41);
+            }
+            key(8400, 5);
+            if scenario == "uart-repl" {
+                key(9000, 41);
+            }
+            key(9600, 5);
+        }
         "multiboot" => {
             key(7000, 41);
             for ms in [7600, 8300, 9000] {
@@ -182,6 +202,9 @@ pub fn run() -> Result<()> {
             anyhow::bail!("CPU exited {code}; {}", session.directory.display());
         }
         let stats = session.ipc.stats();
+        if stats.ticks >= 12 * 240_000_000 && uart_sent < uart_payload.len() {
+            uart_sent += session.ipc.send_uart(&uart_payload[uart_sent..]);
+        }
         let guest_seconds = stats.ticks as f64 / 240_000_000.0;
         if guest_seconds >= next_sample {
             timeline.push(serde_json::json!({
@@ -266,10 +289,31 @@ pub fn run() -> Result<()> {
     }
     let uart =
         String::from_utf8_lossy(&std::fs::read(session.directory.join("uart.log"))?).into_owned();
+    let uart = uart
+        + &String::from_utf8_lossy(
+            &std::fs::read(session.directory.join("usb-serial.log")).unwrap_or_default(),
+        );
     if scenario == "multiboot" {
         ensure!(
             uart.matches("ESP-ROM:").count() >= 2,
             "KeiraOS did not boot the SD application"
+        );
+    }
+    if !uart_payload.is_empty() {
+        let marker = if scenario == "uart-repl" {
+            "UART_REPL_OK"
+        } else {
+            "UART_LIVE_OK"
+        };
+        ensure!(
+            uart_sent == uart_payload.len() && uart.contains(&format!("{marker}_42")),
+            "UART command did not execute: inspect uart.log"
+        );
+    }
+    if scenario == "uart-repl" {
+        ensure!(
+            uart.contains("UART_REPL_OK_42_Привіт"),
+            "UART REPL did not return the Unicode reply"
         );
     }
     ensure!(

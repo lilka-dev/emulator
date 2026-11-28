@@ -74,6 +74,10 @@
     {
       "file": "patches/qemu-darwin-host.patch",
       "sha256": "1aae2bf41ac567f306de8dab10c46405060b22f51fd96ecb87619e058145b0c2"
+    },
+    {
+      "file": "patches/qemu-uart-input.patch",
+      "sha256": "11bbd44a53dff9247fd2d2cb37d5d881ee6af0afad13c5808ce91a4ecb12e90e"
     }
   ],
   "source_files": [
@@ -99,7 +103,7 @@
     },
     {
       "file": "hw/xtensa/esp32s3.c",
-      "sha256": "079aa92180939d36bc2fbb1429930f6926783d2f6aa8f3a7311478aa63617642"
+      "sha256": "d4c7f660b4b3fb331e5b4fedca0eeb1bf2768532bf36203c94bff72c594bf718"
     },
     {
       "file": "hw/xtensa/esp32s3_clk.c",
@@ -107,7 +111,7 @@
     },
     {
       "file": "hw/xtensa/lilka_board_probe.c",
-      "sha256": "278f1293b93a1a21806e1bb167d45c8aaf8cc48da2dc8c812d00905aa08cff60"
+      "sha256": "5820dae8d5ccffaf6541774a5eaa2ca2978fc2c42e26f4c86e108ff29dfaab9a"
     },
     {
       "file": "hw/xtensa/meson.build",
@@ -188,6 +192,14 @@
     {
       "file": "configs/devices/xtensa-softmmu/lilka.mak",
       "sha256": "8c29c2b019361138b6e739064ee7fff38d7fd5d2233932401925cec25db1cb91"
+    },
+    {
+      "file": "hw/misc/esp32c3_jtag.c",
+      "sha256": "aa9a729954a2fc6775d465a0261db00acd0b06b54719ac827a3d05fd760cb6ab"
+    },
+    {
+      "file": "include/hw/misc/esp32c3_jtag.h",
+      "sha256": "cb90abf11336a11bf1a853b5b39d82d39878205a4289c1da91cec887c32a1c17"
     }
   ],
   "binary_sha256": "b4e32b6f1ce8b09bad3f847b0dbceab4c7a49baa6bc5c0e1cb184b0fb7d8e560",

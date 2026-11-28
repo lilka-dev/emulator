@@ -237,6 +237,11 @@ impl Session {
                 "file:{}",
                 self.directory.join("uart.log").display()
             ))
+            .args(["-serial", "null", "-serial"])
+            .arg(format!(
+                "file:{}",
+                self.directory.join("usb-serial.log").display()
+            ))
             .args([
                 "-monitor",
                 "none",
